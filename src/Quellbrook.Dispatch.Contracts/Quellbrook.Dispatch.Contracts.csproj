@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Quellbrook.Dispatch.Contracts</RootNamespace>
+  </PropertyGroup>
+
+</Project>

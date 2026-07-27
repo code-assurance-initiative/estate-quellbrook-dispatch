@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Quellbrook.Dispatch.Api/Quellbrook.Dispatch.Api.csproj" />
+    <Project Path="src/Quellbrook.Dispatch.Application/Quellbrook.Dispatch.Application.csproj" />
+    <Project Path="src/Quellbrook.Dispatch.Contracts/Quellbrook.Dispatch.Contracts.csproj" />
+    <Project Path="src/Quellbrook.Dispatch.Domain/Quellbrook.Dispatch.Domain.csproj" />
+    <Project Path="src/Quellbrook.Dispatch.Infrastructure/Quellbrook.Dispatch.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Quellbrook.Dispatch.IntegrationTests/Quellbrook.Dispatch.IntegrationTests.csproj" />
+    <Project Path="tests/Quellbrook.Dispatch.UnitTests/Quellbrook.Dispatch.UnitTests.csproj" />
+  </Folder>
+</Solution>
