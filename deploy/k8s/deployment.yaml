@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quellbrook-dispatch
+  namespace: quellbrook-dispatch
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quellbrook-dispatch
+  namespace: quellbrook-dispatch
+  labels:
+    app.kubernetes.io/name: quellbrook-dispatch
+    app.kubernetes.io/part-of: quellbrook
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: quellbrook-dispatch
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: enabled
+      labels:
+        app.kubernetes.io/name: quellbrook-dispatch
+        app.kubernetes.io/part-of: quellbrook
+    spec:
+      serviceAccountName: quellbrook-dispatch
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: ghcr.io/code-assurance-initiative/quellbrook-dispatch@sha256:b63140bdbb4422c19ba9bfe4e96a3ccfb70b0455b5646fee095d07ce40cf02cc
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc:4317
+            - name: ConnectionStrings__Dispatch
+              valueFrom:
+                secretKeyRef:
+                  name: quellbrook-dispatch-db
+                  key: connection-string
+            - name: RabbitMq__UserName
+              valueFrom:
+                secretKeyRef:
+                  name: quellbrook-dispatch-broker
+                  key: username
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: quellbrook-dispatch-broker
+                  key: password
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: quellbrook-dispatch
+  namespace: quellbrook-dispatch
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: quellbrook-dispatch
