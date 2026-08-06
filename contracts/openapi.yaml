@@ -1,0 +1,193 @@
+openapi: 3.1.0
+info:
+  title: Quellbrook Dispatch API
+  version: 0.1.0
+  description: Dispatch service of the Quellbrook operations platform. Called by the API gateway only.
+servers:
+  - url: http://quellbrook-dispatch.quellbrook-dispatch.svc.cluster.local
+security:
+  - bearer: []
+paths:
+  /fleet/drivers:
+    post:
+      summary: Register a driver
+      security: [{ bearer: [fleet:admin] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName, depot, licence, shiftStart, shiftEnd]
+              properties:
+                displayName: { type: string, maxLength: 40 }
+                depot: { type: string, maxLength: 16 }
+                licence: { type: string, enum: [b, c1, c] }
+                shiftStart: { type: string, format: time }
+                shiftEnd: { type: string, format: time }
+      responses:
+        '201': { description: Registered. }
+        '400': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /fleet/vehicles:
+    post:
+      summary: Register a vehicle
+      security: [{ bearer: [fleet:admin] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [registration, depot, kind, capacityGrams]
+              properties:
+                registration: { type: string, maxLength: 16 }
+                depot: { type: string, maxLength: 16 }
+                kind: { type: string, enum: [van, rigid] }
+                capacityGrams: { type: integer, minimum: 1, maximum: 7500000 }
+      responses:
+        '201': { description: Registered. }
+        '400': { $ref: '#/components/responses/Problem' }
+  /routes:
+    get:
+      summary: The dispatch board of a day
+      security: [{ bearer: [dispatch:read] }]
+      parameters:
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: Every route of the day with its vehicle, driver and stops.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RouteBoardEntry' }
+    post:
+      summary: Plan a route
+      security: [{ bearer: [dispatch:write] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [depot, zone, serviceDate, driverId, vehicleId]
+              properties:
+                depot: { type: string }
+                zone: { type: string }
+                serviceDate: { type: string, format: date }
+                driverId: { type: string, format: uuid }
+                vehicleId: { type: string, format: uuid }
+                express: { type: boolean, default: false }
+      responses:
+        '201': { description: Planned. }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /routes/{id}/start:
+    post:
+      summary: The route leaves the depot; its consignments are out for delivery
+      security: [{ bearer: [dispatch:write] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Started. }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /consignments/{id}/assignment:
+    post:
+      summary: Assign a waiting consignment to the best route of a day
+      security: [{ bearer: [dispatch:write] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serviceDate]
+              properties:
+                serviceDate: { type: string, format: date }
+      responses:
+        '200': { description: Assigned; the body names the route. }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /consignments/{id}/delivery:
+    post:
+      summary: Record a delivery
+      security: [{ bearer: [dispatch:write] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proof]
+              properties:
+                proof: { type: string, enum: [signature, photo, safePlace] }
+      responses:
+        '204': { description: Recorded. }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /consignments/by-order/{orderId}:
+    get:
+      summary: The consignment of an order
+      security: [{ bearer: [dispatch:read] }]
+      parameters:
+        - { name: orderId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Its status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Consignment' }
+        '404': { description: No consignment for this order (yet). }
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, bearerFormat: JWT }
+  responses:
+    Problem:
+      description: RFC 9457 problem details.
+      content:
+        application/problem+json:
+          schema: { type: object }
+  schemas:
+    Consignment:
+      type: object
+      properties:
+        consignmentId: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        serviceLevel: { type: string }
+        zone: { type: string }
+        status: { type: string, enum: [AwaitingRoute, Assigned, OutForDelivery, Delivered, Cancelled] }
+        routeId: { type: [string, 'null'], format: uuid }
+        outForDeliveryAt: { type: [string, 'null'], format: date-time }
+        deliveredAt: { type: [string, 'null'], format: date-time }
+        proof: { type: [string, 'null'] }
+    RouteBoardEntry:
+      type: object
+      properties:
+        routeId: { type: string, format: uuid }
+        depot: { type: string }
+        zone: { type: string }
+        express: { type: boolean }
+        status: { type: string }
+        driverName: { type: string }
+        vehicleRegistration: { type: string }
+        vehicleKind: { type: string }
+        capacityGrams: { type: integer }
+        loadGrams: { type: integer }
+        stops:
+          type: array
+          items:
+            type: object
+            properties:
+              sequence: { type: integer }
+              consignmentId: { type: string, format: uuid }
+              orderId: { type: string, format: uuid }
+              postalCode: { type: string }
+              weightGrams: { type: integer }
+              status: { type: string }
