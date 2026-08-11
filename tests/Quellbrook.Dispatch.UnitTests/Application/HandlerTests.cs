@@ -175,7 +175,8 @@ public sealed class HandlerTests : IDisposable
     private async Task<OperationResult<Quellbrook.Dispatch.Domain.Routes.RouteId>> AssignAsync(Guid consignmentId)
     {
         using var context = _fixture.Context();
-        var handler = new AssignConsignmentHandler(new EfConsignmentRepository(context), new EfRouteRepository(context), new StandardAssignmentPolicy(), context);
+        var handler = new AssignConsignmentHandler(new EfConsignmentRepository(context), new EfRouteRepository(context), new StandardAssignmentPolicy(),
+            new ExpressAssignmentPolicy(TimeZoneInfo.Utc), context, _fixture.Time);
         return await handler.HandleAsync(new AssignConsignmentCommand(consignmentId, DispatchData.Today), TestContext.Current.CancellationToken);
     }
 

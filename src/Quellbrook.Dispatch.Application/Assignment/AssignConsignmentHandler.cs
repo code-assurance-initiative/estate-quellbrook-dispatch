@@ -13,7 +13,9 @@ public sealed class AssignConsignmentHandler(
     IConsignmentRepository consignments,
     IRouteRepository routes,
     StandardAssignmentPolicy standardPolicy,
-    IUnitOfWork unitOfWork)
+    ExpressAssignmentPolicy expressPolicy,
+    IUnitOfWork unitOfWork,
+    TimeProvider time)
 {
     public async Task<OperationResult<RouteId>> HandleAsync(AssignConsignmentCommand command, CancellationToken cancellationToken)
     {
@@ -30,7 +32,9 @@ public sealed class AssignConsignmentHandler(
         }
 
         var candidates = await routes.CandidatesAsync(command.ServiceDate, cancellationToken).ConfigureAwait(false);
-        var decision = standardPolicy.Choose(consignment, candidates, command.ServiceDate);
+        var decision = consignment.ServiceLevel == ServiceLevel.Express
+            ? expressPolicy.Choose(consignment, candidates, time.GetUtcNow())
+            : standardPolicy.Choose(consignment, candidates, command.ServiceDate);
         if (decision.RouteId is not { } routeId)
         {
             return OperationResult.Conflict<RouteId>(decision.Reason ?? "No route available.");
