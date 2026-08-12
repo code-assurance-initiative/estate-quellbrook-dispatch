@@ -21,7 +21,7 @@ public sealed partial class OrderEventsConsumer(
     public const string QueueName = "dispatch.order-events";
     public const string DeadLetterExchange = "quellbrook.dead-letter";
 
-    public static readonly IReadOnlyList<string> RoutingKeys = ["orders.order-placed.v1"];
+    public static readonly IReadOnlyList<string> RoutingKeys = ["orders.order-placed.v1", "orders.order-cancelled.v1"];
 
     public async Task HandleAsync(IChannel channel, BasicDeliverEventArgs delivery, CancellationToken cancellationToken)
     {

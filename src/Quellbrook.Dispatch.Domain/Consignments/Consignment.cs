@@ -112,6 +112,21 @@ public sealed class Consignment : AggregateRoot
         Raise(new ConsignmentDelivered(Id, OrderId, proof, at));
     }
 
+    /// <summary>
+    /// The order was cancelled before the consignment left the depot; it drops off its route. Once it is out for
+    /// delivery the driver brings it back and the cancellation is handled by hand.
+    /// </summary>
+    public void Cancel()
+    {
+        if (Status is not (ConsignmentStatus.AwaitingRoute or ConsignmentStatus.Assigned))
+        {
+            throw new DomainException($"Consignment {Id} is {Status} and cannot be cancelled.");
+        }
+
+        Status = ConsignmentStatus.Cancelled;
+        RouteId = null;
+    }
+
     private void EnsureStatus(ConsignmentStatus expected, string action)
     {
         if (Status != expected)

@@ -76,6 +76,22 @@ public sealed class Route : AggregateRoot
         consignment.AssignTo(Id);
     }
 
+    /// <summary>Takes a cancelled consignment off the route and renumbers the stops after it.</summary>
+    public void RemoveStop(ConsignmentId consignmentId)
+    {
+        EnsurePlanned();
+        var removed = _stops.RemoveAll(stop => stop.ConsignmentId == consignmentId);
+        if (removed == 0)
+        {
+            throw new DomainException($"Consignment {consignmentId} is not on route {Id}.");
+        }
+
+        for (var i = 0; i < _stops.Count; i++)
+        {
+            _stops[i] = _stops[i] with { Sequence = i + 1 };
+        }
+    }
+
     public void Start(IEnumerable<Consignment> consignments, DateTimeOffset at)
     {
         ArgumentNullException.ThrowIfNull(consignments);

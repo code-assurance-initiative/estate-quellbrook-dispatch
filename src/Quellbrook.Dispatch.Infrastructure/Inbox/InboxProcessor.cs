@@ -52,6 +52,10 @@ public sealed partial class InboxProcessor(IServiceScopeFactory scopes, TimeProv
                 await services.GetRequiredService<OrderPlacedHandler>()
                     .HandleAsync(Deserialize<OrderPlacedMessage>(body), cancellationToken).ConfigureAwait(false);
                 return true;
+            case OrderCancelledMessage.EventType:
+                await services.GetRequiredService<OrderCancelledHandler>()
+                    .HandleAsync(Deserialize<OrderCancelledMessage>(body), cancellationToken).ConfigureAwait(false);
+                return true;
             default:
                 return false;
         }

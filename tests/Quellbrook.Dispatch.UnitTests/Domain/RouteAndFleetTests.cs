@@ -39,6 +39,23 @@ public sealed class RouteAndFleetTests
     }
 
     [Fact]
+    public void RemovingAStopRenumbersTheOnesAfterIt()
+    {
+        var route = DispatchData.Candidate().Route;
+        var consignments = new[] { DispatchData.Consignment(), DispatchData.Consignment(), DispatchData.Consignment() };
+        foreach (var consignment in consignments)
+        {
+            route.AddStop(consignment);
+        }
+
+        route.RemoveStop(consignments[0].Id);
+
+        Assert.Equal([1, 2], route.Stops.Select(stop => stop.Sequence));
+        Assert.Equal(consignments[1].Id, route.Stops[0].ConsignmentId);
+        Assert.Throws<DomainException>(() => route.RemoveStop(consignments[0].Id));
+    }
+
+    [Fact]
     public void AnEmptyRouteCannotStart() =>
         Assert.Throws<DomainException>(() => DispatchData.Candidate().Route.Start([], DispatchData.Now));
 

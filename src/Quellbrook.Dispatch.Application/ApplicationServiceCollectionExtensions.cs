@@ -14,6 +14,7 @@ public static class ApplicationServiceCollectionExtensions
         services.AddSingleton(new StandardAssignmentPolicy());
         services.AddSingleton(new ExpressAssignmentPolicy(TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen")));
         services.AddScoped<OrderPlacedHandler>();
+        services.AddScoped<OrderCancelledHandler>();
         services.AddScoped<AssignConsignmentHandler>();
         services.AddScoped<PlanRouteHandler>();
         services.AddScoped<StartRouteHandler>();

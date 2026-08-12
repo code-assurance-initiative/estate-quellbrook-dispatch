@@ -26,6 +26,7 @@ internal sealed class DbFixture : IDisposable
             .AddSingleton<TimeProvider>(Time)
             .AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>))
             .AddScoped<OrderPlacedHandler>()
+            .AddScoped<OrderCancelledHandler>()
             .BuildServiceProvider();
     }
 

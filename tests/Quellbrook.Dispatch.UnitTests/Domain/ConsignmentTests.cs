@@ -58,6 +58,22 @@ public sealed class ConsignmentTests
         Assert.Throws<DomainException>(() => consignment.AssignTo(new RouteId(Guid.NewGuid())));
     }
 
+    [Fact]
+    public void AnAssignedConsignmentCanBeCancelledButNotOnceItIsOut()
+    {
+        var assigned = DispatchData.Consignment();
+        assigned.AssignTo(new RouteId(Guid.NewGuid()));
+        var outForDelivery = DispatchData.Consignment();
+        outForDelivery.AssignTo(new RouteId(Guid.NewGuid()));
+        outForDelivery.MarkOutForDelivery(DispatchData.Now);
+
+        assigned.Cancel();
+
+        Assert.Equal(ConsignmentStatus.Cancelled, assigned.Status);
+        Assert.Null(assigned.RouteId);
+        Assert.Throws<DomainException>(outForDelivery.Cancel);
+    }
+
     [Theory]
     [InlineData("DK", "1050", "DK-CPH-C")]
     [InlineData("DK", "2300", "DK-CPH-S")]

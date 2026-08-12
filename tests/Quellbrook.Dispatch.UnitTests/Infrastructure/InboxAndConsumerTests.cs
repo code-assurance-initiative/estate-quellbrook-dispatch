@@ -43,6 +43,30 @@ public sealed class InboxAndConsumerTests : IDisposable
     }
 
     [Fact]
+    public async Task ACancelledOrderDropsItsConsignmentFromTheRoute()
+    {
+        await Inbox().ProcessAsync(Guid.NewGuid(), "orders.order-placed.v1", Encoding.UTF8.GetBytes(OrderPlaced), TestContext.Current.CancellationToken);
+        var candidate = DispatchData.Candidate();
+        using (var context = _fixture.Context())
+        {
+            var consignment = await context.Consignments.SingleAsync(TestContext.Current.CancellationToken);
+            context.Drivers.Add(candidate.Driver);
+            context.Vehicles.Add(candidate.Vehicle);
+            context.Routes.Add(candidate.Route);
+            candidate.Route.AddStop(consignment);
+            await context.SaveChangesAsync(TestContext.Current.CancellationToken);
+        }
+
+        var cancelled = """{"orderId":"0198f1a2-0000-7000-8000-000000000042","reason":"Shipper withdrew the order","cancelledAt":"2026-08-03T07:00:00+00:00"}""";
+        var outcome = await Inbox().ProcessAsync(Guid.NewGuid(), "orders.order-cancelled.v1", Encoding.UTF8.GetBytes(cancelled), TestContext.Current.CancellationToken);
+
+        Assert.Equal(InboxOutcome.Processed, outcome);
+        using var reading = _fixture.Context();
+        Assert.Equal(Quellbrook.Dispatch.Domain.Consignments.ConsignmentStatus.Cancelled, (await reading.Consignments.SingleAsync(TestContext.Current.CancellationToken)).Status);
+        Assert.Empty((await reading.Routes.SingleAsync(TestContext.Current.CancellationToken)).Stops);
+    }
+
+    [Fact]
     public async Task AnUnknownEventTypeIsRecordedAndIgnored()
     {
         var outcome = await Inbox().ProcessAsync(Guid.NewGuid(), "orders.order-archived.v1", "{}"u8.ToArray(), TestContext.Current.CancellationToken);
