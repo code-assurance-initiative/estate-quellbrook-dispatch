@@ -25,6 +25,7 @@ public static class ApiPipeline
         app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") })
             .AllowAnonymous();
         app.MapDispatchEndpoints();
+        app.MapDriverEndpoints();
         return app;
     }
 }
