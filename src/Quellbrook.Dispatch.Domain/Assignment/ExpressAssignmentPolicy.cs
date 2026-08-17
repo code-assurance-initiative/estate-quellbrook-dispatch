@@ -11,6 +11,7 @@ public sealed class ExpressAssignmentPolicy(
 {
     public static readonly TimeOnly CutOff = new(14, 0);
     public const double CapacityBuffer = 0.1;
+    public const double HoursBeforeBreak = 4.5;
 
     public AssignmentDecision Choose(Consignment consignment, IReadOnlyList<RouteCandidate> candidates, DateTimeOffset now)
     {
@@ -63,6 +64,12 @@ public sealed class ExpressAssignmentPolicy(
             }
 
             if (time < driver.ShiftStart || time >= driver.ShiftEnd.AddHours(-1))
+            {
+                continue;
+            }
+
+            var hoursWorked = (time - driver.ShiftStart).TotalHours;
+            if (hoursWorked >= HoursBeforeBreak && route.StartedAt is null && !route.Express)
             {
                 continue;
             }
