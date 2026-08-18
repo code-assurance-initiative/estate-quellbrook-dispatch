@@ -10,6 +10,7 @@ public sealed class ExpressAssignmentPolicy(
     double minimumShiftHours = StandardAssignmentPolicy.DefaultMinimumShiftHours)
 {
     public static readonly TimeOnly CutOff = new(14, 0);
+    public const int HeavyConsignmentGrams = 20_000;
     public const double CapacityBuffer = 0.1;
     public const double HoursBeforeBreak = 4.5;
 
@@ -44,6 +45,14 @@ public sealed class ExpressAssignmentPolicy(
             if (!sameZone)
             {
                 continue;
+            }
+
+            if (consignment.TotalWeightGrams > HeavyConsignmentGrams)
+            {
+                if (candidate.Vehicle.Kind != VehicleKind.Rigid || candidate.Driver.Licence < LicenceCategory.C1)
+                {
+                    continue;
+                }
             }
 
             var remaining = candidate.Vehicle.CapacityGrams - route.LoadGrams;
