@@ -11,6 +11,7 @@ public sealed class ExpressAssignmentPolicy(
 {
     public static readonly TimeOnly CutOff = new(14, 0);
     public const int HeavyConsignmentGrams = 20_000;
+    public const int SmallConsignmentParcels = 2;
     public const double CapacityBuffer = 0.1;
     public const double HoursBeforeBreak = 4.5;
 
@@ -44,7 +45,10 @@ public sealed class ExpressAssignmentPolicy(
             var sameZone = route.Zone == consignment.Zone;
             if (!sameZone)
             {
-                continue;
+                if (!DeliveryZones.AreAdjacent(route.Zone, consignment.Zone) || consignment.ParcelCount > SmallConsignmentParcels)
+                {
+                    continue;
+                }
             }
 
             if (consignment.TotalWeightGrams > HeavyConsignmentGrams)

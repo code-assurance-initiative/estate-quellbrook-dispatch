@@ -36,4 +36,21 @@ public static class DeliveryZones
             _ => throw new ArgumentOutOfRangeException(nameof(countryCode), countryCode, "No delivery zones for this country."),
         };
     }
+
+    private static readonly Dictionary<string, string[]> s_adjacent = new(StringComparer.Ordinal)
+    {
+        ["DK-CPH-C"] = ["DK-CPH-S", "DK-CPH-N"],
+        ["DK-CPH-S"] = ["DK-CPH-C", "DK-ZEA"],
+        ["DK-CPH-N"] = ["DK-CPH-C", "DK-ZEA"],
+        ["DK-ZEA"] = ["DK-CPH-S", "DK-CPH-N"],
+        ["DK-AAR"] = ["DK-JUT-C", "DK-JUT-N"],
+        ["DK-JUT-C"] = ["DK-AAR", "DK-JUT-S"],
+        ["DK-JUT-N"] = ["DK-AAR"],
+        ["DK-JUT-S"] = ["DK-JUT-C", "DK-FYN"],
+        ["DK-FYN"] = ["DK-JUT-S"],
+    };
+
+    /// <summary>Whether a route of one zone may serve the other on the same day (express only).</summary>
+    public static bool AreAdjacent(string zone, string other) =>
+        s_adjacent.TryGetValue(zone, out var neighbours) && neighbours.Contains(other, StringComparer.Ordinal);
 }
