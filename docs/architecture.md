@@ -41,7 +41,7 @@ C4Container
   System_Ext(idp, "Identity provider", "OpenID Connect")
   Rel(gateway, api, "Calls", "HTTP/JSON over mesh mTLS, bearer token with dispatch:* / fleet:admin")
   Rel(api, db, "Reads and writes", "EF Core / Npgsql")
-  Rel(broker, api, "Delivers orders.order-placed.v1", "AMQPS")
+  Rel(broker, api, "Delivers orders.order-placed.v1, orders.order-cancelled.v1", "AMQPS")
   Rel(api, broker, "Publishes dispatch.*.v1 from the outbox", "AMQPS")
   Rel(api, idp, "Fetches token signing keys", "HTTPS")
 ```
@@ -80,5 +80,6 @@ sequenceDiagram
 | Routing key | Payload | Direction |
 |---|---|---|
 | `orders.order-placed.v1` | order id, service level, consignee address (postal code, country), parcel weights — dispatch's own copy of the fields it uses (`OrderPlacedMessage`) | consumed |
+| `orders.order-cancelled.v1` | order id, reason, time | consumed |
 | `dispatch.consignment-out-for-delivery.v1` | consignment id, order id, route id, time | published |
 | `dispatch.consignment-delivered.v1` | consignment id, order id, proof (signature, photo, safe place), time | published |

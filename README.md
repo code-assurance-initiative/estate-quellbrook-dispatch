@@ -3,7 +3,8 @@
 The dispatch service of Quellbrook Freight's operations platform. When the order service announces an order
 (`orders.order-placed.v1`), dispatch turns it into a **consignment** waiting in the delivery zone of its postal code.
 Dispatchers plan **routes** — one driver and one vehicle in one zone on one day — and assign consignments to them;
-when a driver leaves the depot the route starts and its consignments are out for delivery, and the driver records
+express consignments received before the 14:00 cut-off go on a route of the same day (ADR 0004). When a
+driver leaves the depot the route starts and its consignments are out for delivery, and the driver records
 each delivery. Dispatch announces both moments (`dispatch.consignment-out-for-delivery.v1`,
 `dispatch.consignment-delivered.v1`), which the notifier turns into messages for the consignee.
 
@@ -20,6 +21,7 @@ each delivery. Dispatch announces both moments (`dispatch.consignment-out-for-de
 | `POST /consignments/{id}/assignment` | `dispatch:write` | Assign a waiting consignment to the best route |
 | `POST /consignments/{id}/delivery` | `dispatch:write` | Record a delivery and its proof |
 | `GET /consignments/by-order/{orderId}` | `dispatch:read` | A consignment's status, for the gateway's shipment view |
+| `GET /drivers/available?date=&depot=` | `dispatch:read` | Drivers and vehicles of a depot without a route on a day |
 | `GET /health/live`, `GET /health/ready` | none | Liveness and readiness probes |
 
 The contract is `contracts/openapi.yaml`. Only the gateway holds a token with these scopes.
@@ -29,6 +31,7 @@ The contract is `contracts/openapi.yaml`. Only the gateway holds a token with th
 | Direction | Routing key | Handled by |
 |---|---|---|
 | consumed | `orders.order-placed.v1` | creates the consignment (idempotent: inbox + one consignment per order) |
+| consumed | `orders.order-cancelled.v1` | drops the consignment and its stop, unless it has left the depot |
 | published | `dispatch.consignment-out-for-delivery.v1` | when a route starts, per consignment |
 | published | `dispatch.consignment-delivered.v1` | when a delivery is recorded |
 

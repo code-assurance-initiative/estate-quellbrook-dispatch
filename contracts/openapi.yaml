@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Quellbrook Dispatch API
-  version: 0.1.0
+  version: 0.2.0
   description: Dispatch service of the Quellbrook operations platform. Called by the API gateway only.
 servers:
   - url: http://quellbrook-dispatch.quellbrook-dispatch.svc.cluster.local
@@ -145,6 +145,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Consignment' }
         '404': { description: No consignment for this order (yet). }
+  /drivers/available:
+    get:
+      summary: Drivers and vehicles of a depot without a route on a day
+      security: [{ bearer: [dispatch:read] }]
+      parameters:
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+        - { name: depot, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: The available drivers and vehicles. }
 components:
   securitySchemes:
     bearer: { type: http, scheme: bearer, bearerFormat: JWT }
