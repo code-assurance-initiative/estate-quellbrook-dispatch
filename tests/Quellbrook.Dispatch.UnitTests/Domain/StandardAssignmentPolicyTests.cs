@@ -64,15 +64,14 @@ public sealed class StandardAssignmentPolicyTests
         Assert.Null(_policy.Choose(DispatchData.Consignment(), [downgraded], DispatchData.Today).RouteId);
     }
 
-    [Fact(Skip = "Fails on CI around midnight; FLEET-212")]
-    public void ARouteForTodayTakesConsignmentsUntilItsVehicleIsFull()
+    [Fact]
+    public void ARouteTakesConsignmentsUntilItsVehicleIsFull()
     {
-        var today = DateOnly.FromDateTime(DateTime.Now);
-        var candidate = DispatchData.Candidate(vehicle: DispatchData.Van(capacityGrams: 5_000), date: today);
+        var candidate = DispatchData.Candidate(vehicle: DispatchData.Van(capacityGrams: 5_000), date: DispatchData.Today);
         var first = DispatchData.Consignment(weights: 3_000);
 
-        Assert.Equal(candidate.Route.Id, _policy.Choose(first, [candidate], DateOnly.FromDateTime(DateTime.UtcNow)).RouteId);
+        Assert.Equal(candidate.Route.Id, _policy.Choose(first, [candidate], DispatchData.Today).RouteId);
         candidate.Route.AddStop(first);
-        Assert.Null(_policy.Choose(DispatchData.Consignment(weights: 3_000), [candidate], DateOnly.FromDateTime(DateTime.UtcNow)).RouteId);
+        Assert.Null(_policy.Choose(DispatchData.Consignment(weights: 3_000), [candidate], DispatchData.Today).RouteId);
     }
 }
