@@ -9,11 +9,9 @@ public sealed class ExpressAssignmentPolicy(
     TimeZoneInfo depotTimeZone,
     double minimumShiftHours = StandardAssignmentPolicy.DefaultMinimumShiftHours)
 {
-    public static readonly TimeOnly CutOff = new(14, 0);
     public const int HeavyConsignmentGrams = 20_000;
     public const int SmallConsignmentParcels = 2;
     public const double CapacityBuffer = 0.1;
-    public const double HoursBeforeBreak = 4.5;
 
     public AssignmentDecision Choose(Consignment consignment, IReadOnlyList<RouteCandidate> candidates, DateTimeOffset now)
     {
@@ -27,9 +25,9 @@ public sealed class ExpressAssignmentPolicy(
             return AssignmentDecision.None("Not an express consignment.");
         }
 
-        if (time > CutOff || local.DayOfWeek == DayOfWeek.Saturday || local.DayOfWeek == DayOfWeek.Sunday)
+        if (ExpressCutOff.HasPassed(local))
         {
-            return AssignmentDecision.None($"The express cut-off ({CutOff:HH:mm} on working days) has passed.");
+            return AssignmentDecision.None($"The express cut-off ({ExpressCutOff.Time:HH:mm} on working days) has passed.");
         }
 
         RouteCandidate? best = null;
@@ -42,21 +40,9 @@ public sealed class ExpressAssignmentPolicy(
                 continue;
             }
 
-            var sameZone = route.Zone == consignment.Zone;
-            if (!sameZone)
+            if (!ZoneFits(route, consignment, out var sameZone) || !VehicleFits(candidate, consignment))
             {
-                if (!DeliveryZones.AreAdjacent(route.Zone, consignment.Zone) || consignment.ParcelCount > SmallConsignmentParcels)
-                {
-                    continue;
-                }
-            }
-
-            if (consignment.TotalWeightGrams > HeavyConsignmentGrams)
-            {
-                if (candidate.Vehicle.Kind != VehicleKind.Rigid || candidate.Driver.Licence < LicenceCategory.C1)
-                {
-                    continue;
-                }
+                continue;
             }
 
             var remaining = candidate.Vehicle.CapacityGrams - route.LoadGrams;
@@ -76,13 +62,7 @@ public sealed class ExpressAssignmentPolicy(
                 continue;
             }
 
-            if (time < driver.ShiftStart || time >= driver.ShiftEnd.AddHours(-1))
-            {
-                continue;
-            }
-
-            var hoursWorked = (time - driver.ShiftStart).TotalHours;
-            if (hoursWorked >= HoursBeforeBreak && route.StartedAt is null && !route.Express)
+            if (!DriverHours.CanTakeExpressStop(driver, route, time))
             {
                 continue;
             }
@@ -92,18 +72,7 @@ public sealed class ExpressAssignmentPolicy(
                 continue;
             }
 
-            var score = 0;
-            if (route.Express)
-            {
-                score += 100;
-            }
-
-            if (sameZone)
-            {
-                score += 50;
-            }
-
-            score -= route.Stops.Count * 5;
+            var score = Score(route, sameZone);
             if (score > bestScore || (score == bestScore && best is not null && remaining < best.RemainingGrams))
             {
                 best = candidate;
@@ -115,4 +84,21 @@ public sealed class ExpressAssignmentPolicy(
             ? AssignmentDecision.None($"No route can take express consignment {consignment.Id} today.")
             : AssignmentDecision.To(best.Route.Id);
     }
+
+    /// <summary>Its own zone, or an adjacent one for a small consignment.</summary>
+    private static bool ZoneFits(Route route, Consignment consignment, out bool sameZone)
+    {
+        sameZone = route.Zone == consignment.Zone;
+        return sameZone
+            || (DeliveryZones.AreAdjacent(route.Zone, consignment.Zone) && consignment.ParcelCount <= SmallConsignmentParcels);
+    }
+
+    /// <summary>A heavy consignment needs a rigid vehicle and a C1 driver.</summary>
+    private static bool VehicleFits(RouteCandidate candidate, Consignment consignment) =>
+        consignment.TotalWeightGrams <= HeavyConsignmentGrams
+        || (candidate.Vehicle.Kind == VehicleKind.Rigid && candidate.Driver.Licence >= LicenceCategory.C1);
+
+    /// <summary>Express runs first, then the consignment's own zone, then the emptier route.</summary>
+    private static int Score(Route route, bool sameZone) =>
+        (route.Express ? 100 : 0) + (sameZone ? 50 : 0) - (route.Stops.Count * 5);
 }
