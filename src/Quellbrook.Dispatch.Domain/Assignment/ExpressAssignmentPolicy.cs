@@ -98,7 +98,7 @@ public sealed class ExpressAssignmentPolicy(
         consignment.TotalWeightGrams <= HeavyConsignmentGrams
         || (candidate.Vehicle.Kind == VehicleKind.Rigid && candidate.Driver.Licence >= LicenceCategory.C1);
 
-    /// <summary>Express runs first, then the consignment's own zone, then the emptier route.</summary>
+    /// <summary>Express runs first, then the consignment's own zone, then the route with fewer stops.</summary>
     private static int Score(Route route, bool sameZone) =>
-        (route.Express ? 100 : 0) + (sameZone ? 50 : 0) - (route.Stops.Count * 5);
+        (route.Express ? 100 : 0) + (sameZone ? 50 : 0) - (route.Stops.Count * 10);
 }
