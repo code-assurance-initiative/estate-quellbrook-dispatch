@@ -34,6 +34,25 @@ public sealed class DispatchApiTests(DispatchApiFactory factory) : IClassFixture
     }
 
     [Fact]
+    public async Task OnlyDriversAndVehiclesWithoutARouteThatDayAreAvailable()
+    {
+        var admin = factory.CreateClient("fleet:admin");
+        var dispatcher = factory.CreateClient("dispatch:read", "dispatch:write");
+        var depot = $"D{Random.Shared.Next(1_000, 9_999)}";
+        var busy = await CreatedIdAsync(await admin.PostAsJsonAsync("/fleet/drivers", new { displayName = "Busy B.", depot, licence = "b", shiftStart = "07:00", shiftEnd = "15:00" }, TestContext.Current.CancellationToken));
+        await CreatedIdAsync(await admin.PostAsJsonAsync("/fleet/drivers", new { displayName = "Free F.", depot, licence = "b", shiftStart = "07:00", shiftEnd = "15:00" }, TestContext.Current.CancellationToken));
+        var van = await CreatedIdAsync(await admin.PostAsJsonAsync("/fleet/vehicles", new { registration = $"QB {Random.Shared.Next(10_000, 99_999)}", depot, kind = "van", capacityGrams = 800_000 }, TestContext.Current.CancellationToken));
+        var day = ServiceDate.AddDays(1);
+        await CreatedIdAsync(await dispatcher.PostAsJsonAsync("/routes", new { depot, zone = "DK-AAR", serviceDate = day, driverId = busy, vehicleId = van, express = false }, TestContext.Current.CancellationToken));
+
+        var available = await dispatcher.GetFromJsonAsync<AvailableDto>($"/drivers/available?date={day:yyyy-MM-dd}&depot={depot}", TestContext.Current.CancellationToken);
+
+        Assert.NotNull(available);
+        Assert.Equal(["Free F."], available.Drivers.Select(driver => driver.DisplayName));
+        Assert.Empty(available.Vehicles);
+    }
+
+    [Fact]
     public async Task InvalidRequestsAreValidationProblems()
     {
         var admin = factory.CreateClient("fleet:admin");
@@ -104,6 +123,10 @@ public sealed class DispatchApiTests(DispatchApiFactory factory) : IClassFixture
     }
 
     private sealed record IdDto(Guid Id);
+
+    private sealed record AvailableDto(IReadOnlyList<DriverDto> Drivers, IReadOnlyList<object> Vehicles);
+
+    private sealed record DriverDto(Guid Id, string DisplayName);
 
     private sealed record ConsignmentDto(Guid ConsignmentId, string Status);
 
