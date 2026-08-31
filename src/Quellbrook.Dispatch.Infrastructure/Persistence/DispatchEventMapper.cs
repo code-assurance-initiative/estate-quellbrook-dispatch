@@ -11,10 +11,10 @@ internal static class DispatchEventMapper
 {
     public static IntegrationMessage ToIntegrationMessage(IDomainEvent domainEvent) => domainEvent switch
     {
-        ConsignmentOutForDelivery outForDelivery => new IntegrationMessage(
+        ConsignmentSentOutForDelivery outForDelivery => new IntegrationMessage(
             Guid.CreateVersion7(outForDelivery.OccurredAt),
-            ConsignmentOutForDeliveryV1.EventType,
-            new ConsignmentOutForDeliveryV1(
+            ConsignmentSentOutForDeliveryV1.EventType,
+            new ConsignmentSentOutForDeliveryV1(
                 outForDelivery.ConsignmentId.Value,
                 outForDelivery.OrderId,
                 outForDelivery.RouteId.Value,

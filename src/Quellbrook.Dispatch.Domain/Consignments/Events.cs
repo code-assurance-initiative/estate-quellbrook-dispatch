@@ -3,7 +3,7 @@ using Quellbrook.Dispatch.Domain.Routes;
 
 namespace Quellbrook.Dispatch.Domain.Consignments;
 
-public sealed record ConsignmentOutForDelivery(
+public sealed record ConsignmentSentOutForDelivery(
     ConsignmentId ConsignmentId,
     Guid OrderId,
     RouteId RouteId,

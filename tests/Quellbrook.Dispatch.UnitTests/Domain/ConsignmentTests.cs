@@ -37,7 +37,7 @@ public sealed class ConsignmentTests
         Assert.Equal(DeliveryProof.SafePlace, consignment.Proof);
         Assert.Collection(
             consignment.DomainEvents,
-            first => Assert.Equal(routeId, Assert.IsType<ConsignmentOutForDelivery>(first).RouteId),
+            first => Assert.Equal(routeId, Assert.IsType<ConsignmentSentOutForDelivery>(first).RouteId),
             second => Assert.Equal(DeliveryProof.SafePlace, Assert.IsType<ConsignmentDelivered>(second).Proof));
     }
 
@@ -77,13 +77,25 @@ public sealed class ConsignmentTests
     [Theory]
     [InlineData("DK", "1050", "DK-CPH-C")]
     [InlineData("DK", "2300", "DK-CPH-S")]
+    [InlineData("DK", "2800", "DK-CPH-N")]
+    [InlineData("DK", "4000", "DK-ZEA")]
+    [InlineData("DK", "5000", "DK-FYN")]
+    [InlineData("DK", "6000", "DK-JUT-S")]
+    [InlineData("DK", "7100", "DK-JUT-C")]
+    [InlineData("DK", "8000", "DK-AAR")]
     [InlineData("DK", "9000", "DK-JUT-N")]
     [InlineData("DK", "3700", "DK-OTHER")]
     [InlineData("SE", "21145", "SE-MAL")]
+    [InlineData("SE", "41101", "SE-GOT")]
+    [InlineData("SE", "11120", "SE-OTHER")]
     [InlineData("NO", "0150", "NO-OSL")]
+    [InlineData("NO", "5003", "NO-OTHER")]
     [InlineData("DE", "20095", "DE-HAM")]
+    [InlineData("DE", "24103", "DE-KIE")]
+    [InlineData("DE", "10115", "DE-OTHER")]
     [InlineData("NL", "1012", "NL-AMS")]
     [InlineData("NL", "3011", "NL-OTHER")]
+    [InlineData("DK", "8", "DK-OTHER")]
     public void PostalCodesMapToTheirDeliveryZone(string country, string postalCode, string zone) =>
         Assert.Equal(zone, DeliveryZones.ZoneFor(country, postalCode));
 

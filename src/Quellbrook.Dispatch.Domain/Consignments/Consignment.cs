@@ -100,7 +100,7 @@ public sealed class Consignment : AggregateRoot
         EnsureStatus(ConsignmentStatus.Assigned, "sent out for delivery");
         Status = ConsignmentStatus.OutForDelivery;
         OutForDeliveryAt = at;
-        Raise(new ConsignmentOutForDelivery(Id, OrderId, RouteId ?? throw new InvalidOperationException("Assigned without a route."), at));
+        Raise(new ConsignmentSentOutForDelivery(Id, OrderId, RouteId ?? throw new InvalidOperationException("Assigned without a route."), at));
     }
 
     public void RecordDelivery(DeliveryProof proof, DateTimeOffset at)
