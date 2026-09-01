@@ -13,6 +13,7 @@ spec:
   system: quellbrook-operations
   providesApis:
     - quellbrook-dispatch-api
+    - quellbrook-dispatch-events
   consumesApis:
     - quellbrook-orders-events
   dependsOn:
@@ -31,3 +32,16 @@ spec:
   system: quellbrook-operations
   definition:
     $text: ./contracts/openapi.yaml
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: quellbrook-dispatch-events
+  description: Dispatch events (consignment out for delivery, delivered), consumed by the notifier.
+spec:
+  type: asyncapi
+  lifecycle: production
+  owner: group:fleet
+  system: quellbrook-operations
+  definition:
+    $text: ./contracts/asyncapi.yaml

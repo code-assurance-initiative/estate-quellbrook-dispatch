@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Quellbrook Dispatch API
-  version: 0.2.0
+  version: 0.3.0
   description: Dispatch service of the Quellbrook operations platform. Called by the API gateway only.
 servers:
   - url: http://quellbrook-dispatch.quellbrook-dispatch.svc.cluster.local

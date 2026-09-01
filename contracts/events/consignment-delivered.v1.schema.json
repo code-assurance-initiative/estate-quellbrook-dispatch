@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quellbrook.example/contracts/dispatch/consignment-delivered.v1.schema.json",
+  "title": "dispatch.consignment-delivered.v1",
+  "description": "Published by the dispatch service when a driver records a delivery. Owned by the Fleet team. Within v1 fields are only added.",
+  "type": "object",
+  "required": ["consignmentId", "orderId", "proof", "deliveredAt"],
+  "properties": {
+    "consignmentId": { "type": "string", "format": "uuid" },
+    "orderId": { "type": "string", "format": "uuid" },
+    "proof": { "enum": ["signature", "photo", "safe-place"] },
+    "deliveredAt": { "type": "string", "format": "date-time" }
+  }
+}

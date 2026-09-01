@@ -1,0 +1,48 @@
+asyncapi: 3.0.0
+info:
+  title: Quellbrook dispatch events
+  version: 1.0.0
+  description: Events published and consumed by the dispatch service on the platform's RabbitMQ topic exchange.
+servers:
+  production:
+    host: rabbitmq.messaging.svc.cluster.local:5671
+    protocol: amqps
+    pathname: /quellbrook
+channels:
+  consignmentOutForDelivery:
+    address: dispatch.consignment-out-for-delivery.v1
+    messages:
+      consignmentOutForDelivery:
+        contentType: application/json
+        payload:
+          $ref: './events/consignment-out-for-delivery.v1.schema.json'
+  consignmentDelivered:
+    address: dispatch.consignment-delivered.v1
+    messages:
+      consignmentDelivered:
+        contentType: application/json
+        payload:
+          $ref: './events/consignment-delivered.v1.schema.json'
+  orderEvents:
+    address: dispatch.order-events
+    description: Durable queue bound to orders.order-placed.v1 and orders.order-cancelled.v1; dead-letters to quellbrook.dead-letter.
+    messages:
+      orderPlaced:
+        payload:
+          $ref: './consumed/orders/order-placed.v1.schema.json'
+      orderCancelled:
+        payload:
+          $ref: './consumed/orders/order-cancelled.v1.schema.json'
+operations:
+  publishOutForDelivery:
+    action: send
+    channel:
+      $ref: '#/channels/consignmentOutForDelivery'
+  publishDelivered:
+    action: send
+    channel:
+      $ref: '#/channels/consignmentDelivered'
+  consumeOrderEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/orderEvents'

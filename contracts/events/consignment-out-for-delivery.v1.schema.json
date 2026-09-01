@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quellbrook.example/contracts/dispatch/consignment-out-for-delivery.v1.schema.json",
+  "title": "dispatch.consignment-out-for-delivery.v1",
+  "description": "Published by the dispatch service for every consignment on a route when the route leaves the depot. Owned by the Fleet team. Within v1 fields are only added.",
+  "type": "object",
+  "required": ["consignmentId", "orderId", "routeId", "outForDeliveryAt"],
+  "properties": {
+    "consignmentId": { "type": "string", "format": "uuid" },
+    "orderId": { "type": "string", "format": "uuid" },
+    "routeId": { "type": "string", "format": "uuid" },
+    "outForDeliveryAt": { "type": "string", "format": "date-time" }
+  }
+}
