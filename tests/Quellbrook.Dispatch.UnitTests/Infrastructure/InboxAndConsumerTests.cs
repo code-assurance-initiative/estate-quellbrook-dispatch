@@ -107,6 +107,32 @@ public sealed class InboxAndConsumerTests : IDisposable
         await channel.DidNotReceive().BasicAckAsync(Arg.Any<ulong>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task TheConsumerDeclaresItsDurableQueueWithDeadLetteringBindsBothEventsAndConsumes()
+    {
+        var channel = Substitute.For<IChannel>();
+        var connection = Substitute.For<IConnection>();
+        connection.CreateChannelAsync(Arg.Any<CreateChannelOptions?>(), Arg.Any<CancellationToken>()).Returns(channel);
+        var connections = Substitute.For<IRabbitMqConnectionProvider>();
+        connections.GetConnectionAsync(Arg.Any<CancellationToken>()).Returns(connection);
+        var consumer = new OrderEventsConsumer(connections, Inbox(), Options.Create(new RabbitMqOptions { Exchange = "quellbrook.events" }),
+            NullLogger<OrderEventsConsumer>.Instance);
+
+        await consumer.StartAsync(TestContext.Current.CancellationToken);
+        await consumer.StopAsync(TestContext.Current.CancellationToken);
+
+        await channel.Received(1).QueueDeclareAsync(
+            OrderEventsConsumer.QueueName, Arg.Is(true), Arg.Is(false), Arg.Is(false),
+            Arg.Is<IDictionary<string, object?>>(arguments => (string?)arguments["x-dead-letter-exchange"] == OrderEventsConsumer.DeadLetterExchange),
+            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
+        await channel.Received(1).QueueBindAsync(OrderEventsConsumer.QueueName, "quellbrook.events", "orders.order-placed.v1",
+            Arg.Any<IDictionary<string, object?>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
+        await channel.Received(1).QueueBindAsync(OrderEventsConsumer.QueueName, "quellbrook.events", "orders.order-cancelled.v1",
+            Arg.Any<IDictionary<string, object?>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
+        await channel.Received(1).BasicConsumeAsync(OrderEventsConsumer.QueueName, Arg.Is(false), Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<bool>(),
+            Arg.Any<IDictionary<string, object?>?>(), Arg.Any<IAsyncBasicConsumer>(), Arg.Any<CancellationToken>());
+    }
+
     private OrderEventsConsumer Consumer() =>
         new(Substitute.For<IRabbitMqConnectionProvider>(), Inbox(), Options.Create(new RabbitMqOptions()), NullLogger<OrderEventsConsumer>.Instance);
 
