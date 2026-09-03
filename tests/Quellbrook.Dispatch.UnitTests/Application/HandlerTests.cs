@@ -146,7 +146,10 @@ public sealed class HandlerTests : IDisposable
         var route = await plan.HandleAsync(new PlanRouteCommand("AAR", "DK-AAR", DispatchData.Today, driver.Value.Value, vehicle.Value.Value, Express: false), TestContext.Current.CancellationToken);
         var missing = await plan.HandleAsync(new PlanRouteCommand("AAR", "DK-AAR", DispatchData.Today, Guid.NewGuid(), vehicle.Value.Value, Express: false), TestContext.Current.CancellationToken);
 
+        var twice = await plan.HandleAsync(new PlanRouteCommand("AAR", "DK-AAR", DispatchData.Today, driver.Value.Value, vehicle.Value.Value, Express: true), TestContext.Current.CancellationToken);
+
         Assert.Equal(OperationStatus.Succeeded, route.Status);
+        Assert.Equal(OperationStatus.Conflict, twice.Status);
         Assert.Equal(OperationStatus.NotFound, missing.Status);
         Assert.Equal(OperationStatus.Invalid, badDriver.Status);
         Assert.Equal(OperationStatus.Invalid, badVehicle.Status);

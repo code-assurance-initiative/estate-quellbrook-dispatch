@@ -40,6 +40,9 @@ public sealed class EfRouteRepository(DispatchDbContext db) : IRouteRepository
         return [.. routes.Select(route => new RouteCandidate(route, vehicles[route.VehicleId], drivers[route.DriverId]))];
     }
 
+    public Task<bool> DriverHasRouteAsync(DriverId driverId, DateOnly serviceDate, CancellationToken cancellationToken) =>
+        db.Routes.AnyAsync(route => route.DriverId == driverId && route.ServiceDate == serviceDate, cancellationToken);
+
     public void Add(Route route) => db.Routes.Add(route);
 }
 

@@ -40,6 +40,7 @@ internal sealed class RouteConfiguration : IEntityTypeConfiguration<Route>
         builder.Property(route => route.Depot).HasMaxLength(16);
         builder.Property(route => route.Zone).HasMaxLength(16);
         builder.HasIndex(route => new { route.ServiceDate, route.Zone });
+        builder.HasIndex(route => new { route.DriverId, route.ServiceDate }).IsUnique();
         builder.OwnsMany(route => route.Stops, stops =>
         {
             stops.ToTable("route_stops");

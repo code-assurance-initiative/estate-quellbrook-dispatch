@@ -19,6 +19,11 @@ public sealed class PlanRouteHandler(IFleetRepository fleet, IRouteRepository ro
             return OperationResult.NotFound<RouteId>("The driver or the vehicle does not exist.");
         }
 
+        if (await routes.DriverHasRouteAsync(driver.Id, command.ServiceDate, cancellationToken).ConfigureAwait(false))
+        {
+            return OperationResult.Conflict<RouteId>($"{driver.DisplayName} already has a route on {command.ServiceDate:yyyy-MM-dd}.");
+        }
+
         try
         {
             var route = Route.Plan(
