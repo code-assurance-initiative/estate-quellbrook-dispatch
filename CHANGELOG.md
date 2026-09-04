@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-04
+
+### Added
+- JSON Schemas and an AsyncAPI document for the dispatch events; pinned copies of the consumed order schemas.
+
+### Changed
+- The express rules are split into the cut-off, driver hours, zone and vehicle fit; express stops are spread over
+  the morning's runs.
+- The out-for-delivery event types are named in the past tense (`ConsignmentSentOutForDelivery`); the routing key
+  `dispatch.consignment-out-for-delivery.v1` is unchanged.
+
+### Fixed
+- A driver can be planned on one route per day only.
+- The route capacity test no longer depends on the time of day (FLEET-212) and runs again.
+
 ## [0.2.0] - 2026-08-21
 
 ### Added
