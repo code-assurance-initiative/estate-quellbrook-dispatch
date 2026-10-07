@@ -1,0 +1,254 @@
+From 92186ae2718e515e3063888aff755d96e83fa83b Mon Sep 17 00:00:00 2001
+From: Kasper Nyholt <kasper.nyholt@example.invalid>
+Date: Tue, 1 Sep 2026 10:26:40 +0200
+Subject: contracts: pin the consumed order schemas; publish the dispatch event
+ schemas and AsyncAPI document
+
+---
+ catalog-info.yaml                             | 14 +++++
+ contracts/asyncapi.yaml                       | 48 ++++++++++++++++
+ contracts/consumed/orders/README.md           |  8 +++
+ .../orders/order-cancelled.v1.schema.json     | 13 +++++
+ .../orders/order-placed.v1.schema.json        | 56 +++++++++++++++++++
+ .../consignment-delivered.v1.schema.json      | 14 +++++
+ ...onsignment-out-for-delivery.v1.schema.json | 14 +++++
+ contracts/openapi.yaml                        |  2 +-
+ 8 files changed, 168 insertions(+), 1 deletion(-)
+ create mode 100644 contracts/asyncapi.yaml
+ create mode 100644 contracts/consumed/orders/README.md
+ create mode 100644 contracts/consumed/orders/order-cancelled.v1.schema.json
+ create mode 100644 contracts/consumed/orders/order-placed.v1.schema.json
+ create mode 100644 contracts/events/consignment-delivered.v1.schema.json
+ create mode 100644 contracts/events/consignment-out-for-delivery.v1.schema.json
+
+diff --git a/catalog-info.yaml b/catalog-info.yaml
+index c0c3b9d..fd48f6d 100644
+--- a/catalog-info.yaml
++++ b/catalog-info.yaml
+@@ -13,6 +13,7 @@ spec:
+   system: quellbrook-operations
+   providesApis:
+     - quellbrook-dispatch-api
++    - quellbrook-dispatch-events
+   consumesApis:
+     - quellbrook-orders-events
+   dependsOn:
+@@ -31,3 +32,16 @@ spec:
+   system: quellbrook-operations
+   definition:
+     $text: ./contracts/openapi.yaml
++---
++apiVersion: backstage.io/v1alpha1
++kind: API
++metadata:
++  name: quellbrook-dispatch-events
++  description: Dispatch events (consignment out for delivery, delivered), consumed by the notifier.
++spec:
++  type: asyncapi
++  lifecycle: production
++  owner: group:fleet
++  system: quellbrook-operations
++  definition:
++    $text: ./contracts/asyncapi.yaml
+diff --git a/contracts/asyncapi.yaml b/contracts/asyncapi.yaml
+new file mode 100644
+index 0000000..5347f42
+--- /dev/null
++++ b/contracts/asyncapi.yaml
+@@ -0,0 +1,48 @@
++asyncapi: 3.0.0
++info:
++  title: Quellbrook dispatch events
++  version: 1.0.0
++  description: Events published and consumed by the dispatch service on the platform's RabbitMQ topic exchange.
++servers:
++  production:
++    host: rabbitmq.messaging.svc.cluster.local:5671
++    protocol: amqps
++    pathname: /quellbrook
++channels:
++  consignmentOutForDelivery:
++    address: dispatch.consignment-out-for-delivery.v1
++    messages:
++      consignmentOutForDelivery:
++        contentType: application/json
++        payload:
++          $ref: './events/consignment-out-for-delivery.v1.schema.json'
++  consignmentDelivered:
++    address: dispatch.consignment-delivered.v1
++    messages:
++      consignmentDelivered:
++        contentType: application/json
++        payload:
++          $ref: './events/consignment-delivered.v1.schema.json'
++  orderEvents:
++    address: dispatch.order-events
++    description: Durable queue bound to orders.order-placed.v1 and orders.order-cancelled.v1; dead-letters to quellbrook.dead-letter.
++    messages:
++      orderPlaced:
++        payload:
++          $ref: './consumed/orders/order-placed.v1.schema.json'
++      orderCancelled:
++        payload:
++          $ref: './consumed/orders/order-cancelled.v1.schema.json'
++operations:
++  publishOutForDelivery:
++    action: send
++    channel:
++      $ref: '#/channels/consignmentOutForDelivery'
++  publishDelivered:
++    action: send
++    channel:
++      $ref: '#/channels/consignmentDelivered'
++  consumeOrderEvents:
++    action: receive
++    channel:
++      $ref: '#/channels/orderEvents'
+diff --git a/contracts/consumed/orders/README.md b/contracts/consumed/orders/README.md
+new file mode 100644
+index 0000000..b62ade7
+--- /dev/null
++++ b/contracts/consumed/orders/README.md
+@@ -0,0 +1,8 @@
++# Consumed: order events
++
++Pinned copies of the order service's event schemas that dispatch implements (`OrderPlacedMessage`,
++`OrderCancelledMessage` in `src/Quellbrook.Dispatch.Application/Intake`). Source:
++`estate-quellbrook-orders/contracts/events/`, release v0.3.0. Within v1 the producer only adds optional fields
++(their ADR 0004); dispatch reads the order id, the service level, the consignee's postal code and country and the
++parcel weights, and ignores everything else — including the consignee's contact details, which it does not store.
++Update the copies when the producer announces a new version.
+diff --git a/contracts/consumed/orders/order-cancelled.v1.schema.json b/contracts/consumed/orders/order-cancelled.v1.schema.json
+new file mode 100644
+index 0000000..4348cf1
+--- /dev/null
++++ b/contracts/consumed/orders/order-cancelled.v1.schema.json
+@@ -0,0 +1,13 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "https://quellbrook.example/contracts/orders/order-cancelled.v1.schema.json",
++  "title": "orders.order-cancelled.v1",
++  "description": "Published by the order service when an order is cancelled. Owned by the Orders team.",
++  "type": "object",
++  "required": ["orderId", "reason", "cancelledAt"],
++  "properties": {
++    "orderId": { "type": "string", "format": "uuid" },
++    "reason": { "type": "string", "maxLength": 200 },
++    "cancelledAt": { "type": "string", "format": "date-time" }
++  }
++}
+diff --git a/contracts/consumed/orders/order-placed.v1.schema.json b/contracts/consumed/orders/order-placed.v1.schema.json
+new file mode 100644
+index 0000000..54e1117
+--- /dev/null
++++ b/contracts/consumed/orders/order-placed.v1.schema.json
+@@ -0,0 +1,56 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "https://quellbrook.example/contracts/orders/order-placed.v1.schema.json",
++  "title": "orders.order-placed.v1",
++  "description": "Published by the order service when an order is placed. Owned by the Orders team. Within v1 fields are only added, never renamed or removed; consumers ignore fields they do not know.",
++  "type": "object",
++  "required": ["orderId", "customerAccountId", "serviceLevel", "consignee", "parcels", "placedAt"],
++  "properties": {
++    "orderId": { "type": "string", "format": "uuid" },
++    "customerAccountId": { "type": "string", "pattern": "^QB-[0-9]{4,12}$" },
++    "serviceLevel": { "enum": ["standard", "express"] },
++    "consignee": {
++      "type": "object",
++      "required": ["name", "address", "contact"],
++      "properties": {
++        "name": { "type": "string", "maxLength": 100 },
++        "address": {
++          "type": "object",
++          "required": ["line1", "postalCode", "city", "countryCode"],
++          "properties": {
++            "line1": { "type": "string", "maxLength": 100 },
++            "line2": { "type": ["string", "null"], "maxLength": 100 },
++            "postalCode": { "type": "string", "maxLength": 10 },
++            "city": { "type": "string", "maxLength": 60 },
++            "countryCode": { "enum": ["DK", "SE", "NO", "DE", "NL"] }
++          }
++        },
++        "contact": {
++          "type": "object",
++          "description": "Personal data: used only to notify the consignee about this delivery (docs/privacy.md).",
++          "properties": {
++            "email": { "type": ["string", "null"], "format": "email" },
++            "phone": { "type": ["string", "null"], "pattern": "^\\+[1-9][0-9]{7,14}$" }
++          }
++        }
++      }
++    },
++    "parcels": {
++      "type": "array",
++      "minItems": 1,
++      "maxItems": 20,
++      "items": {
++        "type": "object",
++        "required": ["number", "weightGrams", "lengthCm", "widthCm", "heightCm"],
++        "properties": {
++          "number": { "type": "integer", "minimum": 1 },
++          "weightGrams": { "type": "integer", "minimum": 1, "maximum": 31500 },
++          "lengthCm": { "type": "integer", "minimum": 1, "maximum": 175 },
++          "widthCm": { "type": "integer", "minimum": 1, "maximum": 175 },
++          "heightCm": { "type": "integer", "minimum": 1, "maximum": 175 }
++        }
++      }
++    },
++    "placedAt": { "type": "string", "format": "date-time" }
++  }
++}
+diff --git a/contracts/events/consignment-delivered.v1.schema.json b/contracts/events/consignment-delivered.v1.schema.json
+new file mode 100644
+index 0000000..ee7ea07
+--- /dev/null
++++ b/contracts/events/consignment-delivered.v1.schema.json
+@@ -0,0 +1,14 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "https://quellbrook.example/contracts/dispatch/consignment-delivered.v1.schema.json",
++  "title": "dispatch.consignment-delivered.v1",
++  "description": "Published by the dispatch service when a driver records a delivery. Owned by the Fleet team. Within v1 fields are only added.",
++  "type": "object",
++  "required": ["consignmentId", "orderId", "proof", "deliveredAt"],
++  "properties": {
++    "consignmentId": { "type": "string", "format": "uuid" },
++    "orderId": { "type": "string", "format": "uuid" },
++    "proof": { "enum": ["signature", "photo", "safe-place"] },
++    "deliveredAt": { "type": "string", "format": "date-time" }
++  }
++}
+diff --git a/contracts/events/consignment-out-for-delivery.v1.schema.json b/contracts/events/consignment-out-for-delivery.v1.schema.json
+new file mode 100644
+index 0000000..eb0e66a
+--- /dev/null
++++ b/contracts/events/consignment-out-for-delivery.v1.schema.json
+@@ -0,0 +1,14 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "https://quellbrook.example/contracts/dispatch/consignment-out-for-delivery.v1.schema.json",
++  "title": "dispatch.consignment-out-for-delivery.v1",
++  "description": "Published by the dispatch service for every consignment on a route when the route leaves the depot. Owned by the Fleet team. Within v1 fields are only added.",
++  "type": "object",
++  "required": ["consignmentId", "orderId", "routeId", "outForDeliveryAt"],
++  "properties": {
++    "consignmentId": { "type": "string", "format": "uuid" },
++    "orderId": { "type": "string", "format": "uuid" },
++    "routeId": { "type": "string", "format": "uuid" },
++    "outForDeliveryAt": { "type": "string", "format": "date-time" }
++  }
++}
+diff --git a/contracts/openapi.yaml b/contracts/openapi.yaml
+index 11d59e4..6ed2cdd 100644
+--- a/contracts/openapi.yaml
++++ b/contracts/openapi.yaml
+@@ -1,7 +1,7 @@
+ openapi: 3.1.0
+ info:
+   title: Quellbrook Dispatch API
+-  version: 0.2.0
++  version: 0.3.0
+   description: Dispatch service of the Quellbrook operations platform. Called by the API gateway only.
+ servers:
+   - url: http://quellbrook-dispatch.quellbrook-dispatch.svc.cluster.local

@@ -1,0 +1,667 @@
+From e9611c8c7335be3c15e7f1f414e2feec1c0a9bdc Mon Sep 17 00:00:00 2001
+From: Kasper Nyholt <kasper.nyholt@example.invalid>
+Date: Thu, 30 Jul 2026 11:18:27 +0200
+Subject: feat: consignments from orders.order-placed.v1 through the inbox
+
+---
+ .../Abstractions/IUnitOfWork.cs               |  7 ++
+ .../Intake/OrderPlacedHandler.cs              | 42 +++++++++
+ .../Intake/OrderPlacedMessage.cs              | 21 +++++
+ .../OperationResult.cs                        | 23 +++++
+ .../Messaging/OrderEventsConsumer.cs          | 83 ++++++++++++++++
+ .../Messaging/RabbitMqConnectionProvider.cs   | 70 ++++++++++++++
+ .../Messaging/RabbitMqOptions.cs              | 22 +++++
+ .../Messaging/RabbitMqPublisher.cs            | 35 +++++++
+ .../Infrastructure/InboxAndConsumerTests.cs   | 94 +++++++++++++++++++
+ .../RabbitMqConnectionProviderTests.cs        | 66 +++++++++++++
+ .../Infrastructure/RabbitMqPublisherTests.cs  | 49 ++++++++++
+ .../TestSupport/DbFixture.cs                  | 51 ++++++++++
+ 12 files changed, 563 insertions(+)
+ create mode 100644 src/Quellbrook.Dispatch.Application/Abstractions/IUnitOfWork.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/Intake/OrderPlacedHandler.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/Intake/OrderPlacedMessage.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/OperationResult.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Messaging/OrderEventsConsumer.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqConnectionProvider.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqOptions.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqPublisher.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Infrastructure/InboxAndConsumerTests.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Infrastructure/RabbitMqConnectionProviderTests.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Infrastructure/RabbitMqPublisherTests.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/TestSupport/DbFixture.cs
+
+diff --git a/src/Quellbrook.Dispatch.Application/Abstractions/IUnitOfWork.cs b/src/Quellbrook.Dispatch.Application/Abstractions/IUnitOfWork.cs
+new file mode 100644
+index 0000000..39a9d10
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Abstractions/IUnitOfWork.cs
+@@ -0,0 +1,7 @@
++namespace Quellbrook.Dispatch.Application.Abstractions;
++
++/// <summary>Commits every change of one command, with the outbox messages for the events it raised, atomically.</summary>
++public interface IUnitOfWork
++{
++    Task SaveChangesAsync(CancellationToken cancellationToken);
++}
+diff --git a/src/Quellbrook.Dispatch.Application/Intake/OrderPlacedHandler.cs b/src/Quellbrook.Dispatch.Application/Intake/OrderPlacedHandler.cs
+new file mode 100644
+index 0000000..1efc385
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Intake/OrderPlacedHandler.cs
+@@ -0,0 +1,42 @@
++using Microsoft.Extensions.Logging;
++using Quellbrook.Dispatch.Application.Abstractions;
++using Quellbrook.Dispatch.Domain.Consignments;
++
++namespace Quellbrook.Dispatch.Application.Intake;
++
++/// <summary>Turns an announced order into a consignment waiting for a route. Safe to run twice for one order.</summary>
++public sealed partial class OrderPlacedHandler(
++    IConsignmentRepository consignments,
++    IUnitOfWork unitOfWork,
++    TimeProvider time,
++    ILogger<OrderPlacedHandler> logger)
++{
++    public async Task HandleAsync(OrderPlacedMessage message, CancellationToken cancellationToken)
++    {
++        ArgumentNullException.ThrowIfNull(message);
++        if (await consignments.FindByOrderAsync(message.OrderId, cancellationToken).ConfigureAwait(false) is not null)
++        {
++            LogAlreadyReceived(message.OrderId);
++            return;
++        }
++
++        var now = time.GetUtcNow();
++        var consignment = Consignment.Receive(
++            new ConsignmentId(Guid.CreateVersion7(now)),
++            message.OrderId,
++            message.ServiceLevel == "express" ? ServiceLevel.Express : ServiceLevel.Standard,
++            message.Consignee.Address.CountryCode,
++            message.Consignee.Address.PostalCode,
++            [.. message.Parcels.Select(parcel => parcel.WeightGrams)],
++            now);
++        consignments.Add(consignment);
++        await unitOfWork.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++        LogReceived(message.OrderId, consignment.Zone);
++    }
++
++    [LoggerMessage(Level = LogLevel.Information, Message = "Consignment for order {OrderId} received for zone {Zone}")]
++    private partial void LogReceived(Guid orderId, string zone);
++
++    [LoggerMessage(Level = LogLevel.Debug, Message = "Order {OrderId} already has a consignment")]
++    private partial void LogAlreadyReceived(Guid orderId);
++}
+diff --git a/src/Quellbrook.Dispatch.Application/Intake/OrderPlacedMessage.cs b/src/Quellbrook.Dispatch.Application/Intake/OrderPlacedMessage.cs
+new file mode 100644
+index 0000000..1a8c3cd
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Intake/OrderPlacedMessage.cs
+@@ -0,0 +1,21 @@
++namespace Quellbrook.Dispatch.Application.Intake;
++
++/// <summary>
++/// Dispatch's copy of the order service's <c>orders.order-placed.v1</c> payload: only the fields dispatch uses
++/// (contracts/consumed/orders/order-placed.v1.schema.json is the pinned schema). Unknown fields are ignored.
++/// </summary>
++public sealed record OrderPlacedMessage(
++    Guid OrderId,
++    string ServiceLevel,
++    OrderPlacedMessage.ConsigneePart Consignee,
++    IReadOnlyList<OrderPlacedMessage.ParcelPart> Parcels,
++    DateTimeOffset PlacedAt)
++{
++    public const string EventType = "orders.order-placed.v1";
++
++    public sealed record ConsigneePart(AddressPart Address);
++
++    public sealed record AddressPart(string PostalCode, string CountryCode);
++
++    public sealed record ParcelPart(int WeightGrams);
++}
+diff --git a/src/Quellbrook.Dispatch.Application/OperationResult.cs b/src/Quellbrook.Dispatch.Application/OperationResult.cs
+new file mode 100644
+index 0000000..08ebd50
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/OperationResult.cs
+@@ -0,0 +1,23 @@
++namespace Quellbrook.Dispatch.Application;
++
++public enum OperationStatus
++{
++    Succeeded,
++    Invalid,
++    NotFound,
++    Conflict,
++}
++
++/// <summary>The outcome of a command: a value, or why there is none. Business-rule failures are results, not exceptions.</summary>
++public sealed record OperationResult<T>(OperationStatus Status, T? Value, string? Error);
++
++public static class OperationResult
++{
++    public static OperationResult<T> Succeeded<T>(T value) => new(OperationStatus.Succeeded, value, null);
++
++    public static OperationResult<T> Invalid<T>(string error) => new(OperationStatus.Invalid, default, error);
++
++    public static OperationResult<T> NotFound<T>(string error) => new(OperationStatus.NotFound, default, error);
++
++    public static OperationResult<T> Conflict<T>(string error) => new(OperationStatus.Conflict, default, error);
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Messaging/OrderEventsConsumer.cs b/src/Quellbrook.Dispatch.Infrastructure/Messaging/OrderEventsConsumer.cs
+new file mode 100644
+index 0000000..ea659d9
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Messaging/OrderEventsConsumer.cs
+@@ -0,0 +1,83 @@
++using Microsoft.Extensions.Hosting;
++using Microsoft.Extensions.Logging;
++using Microsoft.Extensions.Options;
++using Quellbrook.Dispatch.Infrastructure.Inbox;
++using RabbitMQ.Client;
++using RabbitMQ.Client.Events;
++
++namespace Quellbrook.Dispatch.Infrastructure.Messaging;
++
++/// <summary>
++/// Consumes the order service's events from the durable queue <c>dispatch.order-events</c>. A message is acknowledged
++/// once the inbox has processed it; one that cannot be processed is rejected to the dead-letter exchange, where the
++/// Fleet team's on-call looks at it.
++/// </summary>
++public sealed partial class OrderEventsConsumer(
++    IRabbitMqConnectionProvider connections,
++    InboxProcessor inbox,
++    IOptions<RabbitMqOptions> options,
++    ILogger<OrderEventsConsumer> logger) : BackgroundService
++{
++    public const string QueueName = "dispatch.order-events";
++    public const string DeadLetterExchange = "quellbrook.dead-letter";
++
++    public static readonly IReadOnlyList<string> RoutingKeys = ["orders.order-placed.v1"];
++
++    public async Task HandleAsync(IChannel channel, BasicDeliverEventArgs delivery, CancellationToken cancellationToken)
++    {
++        ArgumentNullException.ThrowIfNull(channel);
++        ArgumentNullException.ThrowIfNull(delivery);
++        if (!Guid.TryParse(delivery.BasicProperties.MessageId, out var messageId))
++        {
++            LogRejected(delivery.RoutingKey, "no message id");
++            await channel.BasicNackAsync(delivery.DeliveryTag, multiple: false, requeue: false, cancellationToken).ConfigureAwait(false);
++            return;
++        }
++
++        try
++        {
++            await inbox.ProcessAsync(messageId, delivery.RoutingKey, delivery.Body, cancellationToken).ConfigureAwait(false);
++            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken).ConfigureAwait(false);
++        }
++        catch (Exception exception) when (exception is not OperationCanceledException)
++        {
++            LogFailed(exception, messageId, delivery.RoutingKey);
++            await channel.BasicNackAsync(delivery.DeliveryTag, multiple: false, requeue: false, cancellationToken).ConfigureAwait(false);
++        }
++    }
++
++    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
++    {
++        var connection = await connections.GetConnectionAsync(stoppingToken).ConfigureAwait(false);
++        var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken).ConfigureAwait(false);
++        await using (channel.ConfigureAwait(false))
++        {
++            var exchange = options.Value.Exchange;
++            await channel.ExchangeDeclareAsync(exchange, ExchangeType.Topic, durable: true, autoDelete: false, cancellationToken: stoppingToken)
++                .ConfigureAwait(false);
++            await channel.QueueDeclareAsync(
++                QueueName,
++                durable: true,
++                exclusive: false,
++                autoDelete: false,
++                arguments: new Dictionary<string, object?> { ["x-dead-letter-exchange"] = DeadLetterExchange },
++                cancellationToken: stoppingToken).ConfigureAwait(false);
++            foreach (var routingKey in RoutingKeys)
++            {
++                await channel.QueueBindAsync(QueueName, exchange, routingKey, cancellationToken: stoppingToken).ConfigureAwait(false);
++            }
++
++            await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 10, global: false, stoppingToken).ConfigureAwait(false);
++            var consumer = new AsyncEventingBasicConsumer(channel);
++            consumer.ReceivedAsync += (_, delivery) => HandleAsync(channel, delivery, stoppingToken);
++            await channel.BasicConsumeAsync(QueueName, autoAck: false, consumer, stoppingToken).ConfigureAwait(false);
++            await Task.Delay(Timeout.Infinite, stoppingToken).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
++        }
++    }
++
++    [LoggerMessage(Level = LogLevel.Error, Message = "Message {MessageId} ({RoutingKey}) failed and was dead-lettered")]
++    private partial void LogFailed(Exception exception, Guid messageId, string routingKey);
++
++    [LoggerMessage(Level = LogLevel.Warning, Message = "A {RoutingKey} message was dead-lettered: {Reason}")]
++    private partial void LogRejected(string routingKey, string reason);
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqConnectionProvider.cs b/src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqConnectionProvider.cs
+new file mode 100644
+index 0000000..348ab4a
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqConnectionProvider.cs
+@@ -0,0 +1,70 @@
++using Microsoft.Extensions.Options;
++using RabbitMQ.Client;
++
++namespace Quellbrook.Dispatch.Infrastructure.Messaging;
++
++public interface IRabbitMqConnectionProvider
++{
++    Task<IConnection> GetConnectionAsync(CancellationToken cancellationToken);
++}
++
++/// <summary>One long-lived connection per process, opened on first use and reopened if the broker closed it.</summary>
++public sealed class RabbitMqConnectionProvider(IConnectionFactory factory) : IRabbitMqConnectionProvider, IAsyncDisposable
++{
++    private readonly SemaphoreSlim _gate = new(1, 1);
++    private IConnection? _connection;
++
++    public async Task<IConnection> GetConnectionAsync(CancellationToken cancellationToken)
++    {
++        if (_connection is { IsOpen: true } open)
++        {
++            return open;
++        }
++
++        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
++        try
++        {
++            if (_connection is { IsOpen: true } current)
++            {
++                return current;
++            }
++
++            if (_connection is not null)
++            {
++                await _connection.DisposeAsync().ConfigureAwait(false);
++            }
++
++            _connection = await factory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
++            return _connection;
++        }
++        finally
++        {
++            _gate.Release();
++        }
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        if (_connection is not null)
++        {
++            await _connection.DisposeAsync().ConfigureAwait(false);
++        }
++
++        _gate.Dispose();
++    }
++
++    /// <summary>The client's connection factory for the configured broker; automatic recovery on.</summary>
++    public static ConnectionFactory CreateFactory(IOptions<RabbitMqOptions> options)
++    {
++        ArgumentNullException.ThrowIfNull(options);
++        var settings = options.Value;
++        return new ConnectionFactory
++        {
++            Uri = settings.Uri ?? throw new InvalidOperationException("RabbitMq:Uri is not configured."),
++            UserName = settings.UserName,
++            Password = settings.Password,
++            ClientProvidedName = "quellbrook-dispatch",
++            AutomaticRecoveryEnabled = true,
++        };
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqOptions.cs b/src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqOptions.cs
+new file mode 100644
+index 0000000..042cb4d
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqOptions.cs
+@@ -0,0 +1,22 @@
++using System.ComponentModel.DataAnnotations;
++
++namespace Quellbrook.Dispatch.Infrastructure.Messaging;
++
++/// <summary>Where events are published. Credentials come from the environment (a Kubernetes Secret).</summary>
++public sealed class RabbitMqOptions
++{
++    public const string SectionName = "RabbitMq";
++
++    /// <summary>amqps://host:port/virtual-host, without credentials.</summary>
++    [Required]
++    public Uri? Uri { get; set; }
++
++    [Required]
++    public string UserName { get; set; } = string.Empty;
++
++    [Required]
++    public string Password { get; set; } = string.Empty;
++
++    [Required]
++    public string Exchange { get; set; } = "quellbrook.events";
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqPublisher.cs b/src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqPublisher.cs
+new file mode 100644
+index 0000000..67fd0b8
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Messaging/RabbitMqPublisher.cs
+@@ -0,0 +1,35 @@
++using Microsoft.Extensions.Options;
++using Quellbrook.Dispatch.Infrastructure.Outbox;
++using RabbitMQ.Client;
++
++namespace Quellbrook.Dispatch.Infrastructure.Messaging;
++
++/// <summary>
++/// Publishes JSON events to the topic exchange with the event type as routing key, as persistent messages, and waits
++/// for the broker's publisher confirmation.
++/// </summary>
++public sealed class RabbitMqPublisher(IRabbitMqConnectionProvider connections, IOptions<RabbitMqOptions> options)
++    : IOutboxPublisher
++{
++    public async Task PublishAsync(Guid messageId, string eventType, ReadOnlyMemory<byte> body, CancellationToken cancellationToken)
++    {
++        var exchange = options.Value.Exchange;
++        var connection = await connections.GetConnectionAsync(cancellationToken).ConfigureAwait(false);
++        var channelOptions = new CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true);
++        var channel = await connection.CreateChannelAsync(channelOptions, cancellationToken).ConfigureAwait(false);
++        await using (channel.ConfigureAwait(false))
++        {
++            await channel.ExchangeDeclareAsync(exchange, ExchangeType.Topic, durable: true, autoDelete: false, cancellationToken: cancellationToken)
++                .ConfigureAwait(false);
++            var properties = new BasicProperties
++            {
++                MessageId = messageId.ToString(),
++                Type = eventType,
++                ContentType = "application/json",
++                DeliveryMode = DeliveryModes.Persistent,
++            };
++            await channel.BasicPublishAsync(exchange, eventType, mandatory: true, properties, body, cancellationToken)
++                .ConfigureAwait(false);
++        }
++    }
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/InboxAndConsumerTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/InboxAndConsumerTests.cs
+new file mode 100644
+index 0000000..9c07e99
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/InboxAndConsumerTests.cs
+@@ -0,0 +1,94 @@
++using System.Text;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Logging.Abstractions;
++using Microsoft.Extensions.Options;
++using NSubstitute;
++using Quellbrook.Dispatch.Infrastructure.Inbox;
++using Quellbrook.Dispatch.Infrastructure.Messaging;
++using Quellbrook.Dispatch.UnitTests.TestSupport;
++using RabbitMQ.Client;
++using RabbitMQ.Client.Events;
++
++namespace Quellbrook.Dispatch.UnitTests.Infrastructure;
++
++public sealed class InboxAndConsumerTests : IDisposable
++{
++    private const string OrderPlaced = """
++        {"orderId":"0198f1a2-0000-7000-8000-000000000042","customerAccountId":"QB-104233","serviceLevel":"express",
++         "consignee":{"name":"Halden Bikes ApS","address":{"line1":"Søndergade 12","postalCode":"8000","city":"Aarhus C","countryCode":"DK"},"contact":{}},
++         "parcels":[{"number":1,"weightGrams":2400,"lengthCm":40,"widthCm":30,"heightCm":20}],"placedAt":"2026-08-03T06:00:00+00:00"}
++        """;
++
++    private readonly DbFixture _fixture = new();
++
++    private InboxProcessor Inbox() =>
++        new(_fixture.Services.GetRequiredService<IServiceScopeFactory>(), _fixture.Time, NullLogger<InboxProcessor>.Instance);
++
++    [Fact]
++    public async Task AMessageIsProcessedOnceAndItsRedeliveryIsSkipped()
++    {
++        var messageId = Guid.NewGuid();
++
++        var first = await Inbox().ProcessAsync(messageId, "orders.order-placed.v1", Encoding.UTF8.GetBytes(OrderPlaced), TestContext.Current.CancellationToken);
++        var redelivered = await Inbox().ProcessAsync(messageId, "orders.order-placed.v1", Encoding.UTF8.GetBytes(OrderPlaced), TestContext.Current.CancellationToken);
++
++        Assert.Equal(InboxOutcome.Processed, first);
++        Assert.Equal(InboxOutcome.Duplicate, redelivered);
++        using var context = _fixture.Context();
++        var consignment = await context.Consignments.SingleAsync(TestContext.Current.CancellationToken);
++        Assert.Equal(Guid.Parse("0198f1a2-0000-7000-8000-000000000042"), consignment.OrderId);
++        Assert.Equal(Quellbrook.Dispatch.Domain.Consignments.ServiceLevel.Express, consignment.ServiceLevel);
++        Assert.Equal(messageId, (await context.InboxMessages.SingleAsync(TestContext.Current.CancellationToken)).MessageId);
++    }
++
++    [Fact]
++    public async Task AnUnknownEventTypeIsRecordedAndIgnored()
++    {
++        var outcome = await Inbox().ProcessAsync(Guid.NewGuid(), "orders.order-archived.v1", "{}"u8.ToArray(), TestContext.Current.CancellationToken);
++
++        Assert.Equal(InboxOutcome.Ignored, outcome);
++        using var context = _fixture.Context();
++        Assert.Empty(context.Consignments);
++    }
++
++    [Fact]
++    public async Task AMalformedMessageLeavesNoTrace()
++    {
++        await Assert.ThrowsAnyAsync<Exception>(() => Inbox().ProcessAsync(Guid.NewGuid(), "orders.order-placed.v1", "not json"u8.ToArray(), TestContext.Current.CancellationToken));
++
++        using var context = _fixture.Context();
++        Assert.Empty(context.InboxMessages);
++    }
++
++    [Fact]
++    public async Task TheConsumerAcknowledgesAProcessedMessage()
++    {
++        var channel = Substitute.For<IChannel>();
++
++        await Consumer().HandleAsync(channel, Delivery(Guid.NewGuid().ToString(), OrderPlaced), TestContext.Current.CancellationToken);
++
++        await channel.Received(1).BasicAckAsync(7, false, Arg.Any<CancellationToken>());
++    }
++
++    [Fact]
++    public async Task TheConsumerDeadLettersAMessageWithoutIdOrThatFails()
++    {
++        var channel = Substitute.For<IChannel>();
++
++        await Consumer().HandleAsync(channel, Delivery(null, OrderPlaced), TestContext.Current.CancellationToken);
++        await Consumer().HandleAsync(channel, Delivery(Guid.NewGuid().ToString(), "not json"), TestContext.Current.CancellationToken);
++
++        await channel.Received(2).BasicNackAsync(7, false, false, Arg.Any<CancellationToken>());
++        await channel.DidNotReceive().BasicAckAsync(Arg.Any<ulong>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
++    }
++
++    private OrderEventsConsumer Consumer() =>
++        new(Substitute.For<IRabbitMqConnectionProvider>(), Inbox(), Options.Create(new RabbitMqOptions()), NullLogger<OrderEventsConsumer>.Instance);
++
++    private static BasicDeliverEventArgs Delivery(string? messageId, string body) =>
++        new("consumer", 7, false, "quellbrook.events", "orders.order-placed.v1",
++            new BasicProperties { MessageId = messageId }, Encoding.UTF8.GetBytes(body));
++
++    public void Dispose() => _fixture.Dispose();
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/RabbitMqConnectionProviderTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/RabbitMqConnectionProviderTests.cs
+new file mode 100644
+index 0000000..84bf582
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/RabbitMqConnectionProviderTests.cs
+@@ -0,0 +1,66 @@
++using Microsoft.Extensions.Options;
++using NSubstitute;
++using Quellbrook.Dispatch.Infrastructure.Messaging;
++using RabbitMQ.Client;
++
++namespace Quellbrook.Dispatch.UnitTests.Infrastructure;
++
++public sealed class RabbitMqConnectionProviderTests
++{
++    private readonly IConnectionFactory _factory = Substitute.For<IConnectionFactory>();
++
++    [Fact]
++    public async Task AnOpenConnectionIsReused()
++    {
++        var connection = Connection(open: true);
++        _factory.CreateConnectionAsync(Arg.Any<CancellationToken>()).Returns(connection);
++        await using var provider = new RabbitMqConnectionProvider(_factory);
++
++        var first = await provider.GetConnectionAsync(TestContext.Current.CancellationToken);
++        var second = await provider.GetConnectionAsync(TestContext.Current.CancellationToken);
++
++        Assert.Same(first, second);
++        await _factory.Received(1).CreateConnectionAsync(Arg.Any<CancellationToken>());
++    }
++
++    [Fact]
++    public async Task AClosedConnectionIsDisposedAndReplaced()
++    {
++        var closed = Connection(open: false);
++        var fresh = Connection(open: true);
++        _factory.CreateConnectionAsync(Arg.Any<CancellationToken>()).Returns(closed, fresh);
++        await using var provider = new RabbitMqConnectionProvider(_factory);
++
++        await provider.GetConnectionAsync(TestContext.Current.CancellationToken);
++        var second = await provider.GetConnectionAsync(TestContext.Current.CancellationToken);
++
++        Assert.Same(fresh, second);
++        await closed.Received(1).DisposeAsync();
++    }
++
++    [Fact]
++    public void TheFactoryUsesTheConfiguredBrokerAndCredentials()
++    {
++        var factory = RabbitMqConnectionProvider.CreateFactory(Options.Create(new RabbitMqOptions
++        {
++            Uri = new Uri("amqps://rabbitmq.messaging.svc.cluster.local:5671/quellbrook"),
++            UserName = "dispatch",
++        }));
++
++        Assert.Equal("rabbitmq.messaging.svc.cluster.local", factory.HostName);
++        Assert.Equal("quellbrook", factory.VirtualHost);
++        Assert.Equal("dispatch", factory.UserName);
++        Assert.True(factory.AutomaticRecoveryEnabled);
++    }
++
++    [Fact]
++    public void AMissingBrokerAddressIsAConfigurationError() =>
++        Assert.Throws<InvalidOperationException>(() => RabbitMqConnectionProvider.CreateFactory(Options.Create(new RabbitMqOptions())));
++
++    private static IConnection Connection(bool open)
++    {
++        var connection = Substitute.For<IConnection>();
++        connection.IsOpen.Returns(open);
++        return connection;
++    }
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/RabbitMqPublisherTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/RabbitMqPublisherTests.cs
+new file mode 100644
+index 0000000..69ffd52
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/RabbitMqPublisherTests.cs
+@@ -0,0 +1,49 @@
++using System.Text.Json;
++using Microsoft.Extensions.Options;
++using NSubstitute;
++using Quellbrook.Dispatch.Infrastructure.Messaging;
++using RabbitMQ.Client;
++
++namespace Quellbrook.Dispatch.UnitTests.Infrastructure;
++
++public sealed class RabbitMqPublisherTests
++{
++    private readonly IChannel _channel = Substitute.For<IChannel>();
++    private readonly IRabbitMqConnectionProvider _connections = Substitute.For<IRabbitMqConnectionProvider>();
++
++    public RabbitMqPublisherTests()
++    {
++        var connection = Substitute.For<IConnection>();
++        connection.CreateChannelAsync(Arg.Any<CreateChannelOptions?>(), Arg.Any<CancellationToken>()).Returns(_channel);
++        _connections.GetConnectionAsync(Arg.Any<CancellationToken>()).Returns(connection);
++    }
++
++    [Fact]
++    public async Task EventsArePublishedPersistentlyToTheTopicExchangeUnderTheirType()
++    {
++        var publisher = new RabbitMqPublisher(_connections, Options.Create(new RabbitMqOptions { Exchange = "quellbrook.events" }));
++        var messageId = Guid.Parse("0198f1a2-0000-7000-8000-0000000000aa");
++        ReadOnlyMemory<byte> body = default;
++        BasicProperties? properties = null;
++        await _channel.BasicPublishAsync(
++            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<bool>(),
++            Arg.Do<BasicProperties>(value => properties = value),
++            Arg.Do<ReadOnlyMemory<byte>>(value => body = value),
++            Arg.Any<CancellationToken>());
++
++        await publisher.PublishAsync(messageId, "orders.order-placed.v1", "{\"orderId\":42}"u8.ToArray(), TestContext.Current.CancellationToken);
++
++        await _channel.Received(1).ExchangeDeclareAsync(
++            "quellbrook.events", ExchangeType.Topic, true, Arg.Is(false), Arg.Any<IDictionary<string, object?>?>(),
++            Arg.Is(false), Arg.Is(false), Arg.Any<CancellationToken>());
++        await _channel.Received(1).BasicPublishAsync(
++            "quellbrook.events", "orders.order-placed.v1", true, Arg.Any<BasicProperties>(),
++            Arg.Any<ReadOnlyMemory<byte>>(), Arg.Any<CancellationToken>());
++        Assert.NotNull(properties);
++        Assert.Equal(messageId.ToString(), properties.MessageId);
++        Assert.Equal(DeliveryModes.Persistent, properties.DeliveryMode);
++        Assert.Equal("application/json", properties.ContentType);
++        using var json = JsonDocument.Parse(body);
++        Assert.Equal(42, json.RootElement.GetProperty("orderId").GetInt32());
++    }
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/TestSupport/DbFixture.cs b/tests/Quellbrook.Dispatch.UnitTests/TestSupport/DbFixture.cs
+new file mode 100644
+index 0000000..1ba2c00
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/TestSupport/DbFixture.cs
+@@ -0,0 +1,51 @@
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Logging.Abstractions;
++using Microsoft.Extensions.Time.Testing;
++using Quellbrook.Dispatch.Application.Abstractions;
++using Quellbrook.Dispatch.Application.Intake;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Domain.Routes;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++
++namespace Quellbrook.Dispatch.UnitTests.TestSupport;
++
++/// <summary>A SQLite database and a service provider with the real repositories over it, one scope per call.</summary>
++internal sealed class DbFixture : IDisposable
++{
++    private readonly SqliteDispatchDb _db = new();
++
++    public DbFixture()
++    {
++        Services = new ServiceCollection()
++            .AddScoped(_ => _db.CreateContext())
++            .AddScoped<IUnitOfWork>(provider => provider.GetRequiredService<DispatchDbContext>())
++            .AddScoped<IConsignmentRepository, EfConsignmentRepository>()
++            .AddScoped<IRouteRepository, EfRouteRepository>()
++            .AddScoped<IFleetRepository, EfFleetRepository>()
++            .AddSingleton<TimeProvider>(Time)
++            .AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>))
++            .AddScoped<OrderPlacedHandler>()
++            .BuildServiceProvider();
++    }
++
++    public FakeTimeProvider Time { get; } = new(DispatchData.Now);
++
++    public ServiceProvider Services { get; }
++
++    public DispatchDbContext Context() => _db.CreateContext();
++
++    public async Task<T> SeedAsync<T>(Func<DispatchDbContext, T> seed)
++    {
++        using var context = Context();
++        var value = seed(context);
++        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
++        return value;
++    }
++
++    public void Dispose()
++    {
++        Services.Dispose();
++        _db.Dispose();
++    }
++}

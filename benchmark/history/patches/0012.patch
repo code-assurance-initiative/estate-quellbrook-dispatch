@@ -1,0 +1,28 @@
+From b56df9aee1bd3d96886258b46a3cd8cfdabc207b Mon Sep 17 00:00:00 2001
+From: Kasper Nyholt <kasper.nyholt@example.invalid>
+Date: Fri, 7 Aug 2026 16:22:05 +0200
+Subject: release 0.1.0
+
+---
+ CHANGELOG.md | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+ create mode 100644 CHANGELOG.md
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+new file mode 100644
+index 0000000..33b72a1
+--- /dev/null
++++ b/CHANGELOG.md
+@@ -0,0 +1,12 @@
++# Changelog
++
++All notable changes to this project are documented here. The format follows
++[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
++
++## [0.1.0] - 2026-08-07
++
++### Added
++- Consignments from `orders.order-placed.v1` through an inbox; delivery zones by postal code.
++- Drivers, vehicles and routes; standard assignment of a consignment to the route its vehicle fits best.
++- Starting a route and recording deliveries, announced as `dispatch.*` events through an outbox.
++- Dispatch board and consignment status queries; container image, manifests, CI, CodeQL, release and deploy workflows.

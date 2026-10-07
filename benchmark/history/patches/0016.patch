@@ -1,0 +1,86 @@
+From 3753e72192b8672eca20ca12003dae6573eeca74 Mon Sep 17 00:00:00 2001
+From: Dario Fenwick <dario.fenwick@example.invalid>
+Date: Thu, 13 Aug 2026 17:31:20 +0200
+Subject: feat(api): drivers and vehicles available for the board
+
+---
+ .../Endpoints/DriverEndpoints.cs              | 57 +++++++++++++++++++
+ .../Hosting/ApiPipeline.cs                    |  1 +
+ 2 files changed, 58 insertions(+)
+ create mode 100644 src/Quellbrook.Dispatch.Api/Endpoints/DriverEndpoints.cs
+
+diff --git a/src/Quellbrook.Dispatch.Api/Endpoints/DriverEndpoints.cs b/src/Quellbrook.Dispatch.Api/Endpoints/DriverEndpoints.cs
+new file mode 100644
+index 0000000..b93f097
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Api/Endpoints/DriverEndpoints.cs
+@@ -0,0 +1,57 @@
++using Microsoft.EntityFrameworkCore;
++using Quellbrook.Dispatch.Api.Security;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++
++namespace Quellbrook.Dispatch.Api.Endpoints;
++
++/// <summary>Drivers of a depot who have no route on a day yet, for the dispatch board's route planner.</summary>
++public static class DriverEndpoints
++{
++    public static IEndpointRouteBuilder MapDriverEndpoints(this IEndpointRouteBuilder app)
++    {
++        app.MapGet("/drivers/available", AvailableAsync).RequireAuthorization(AuthorizationPolicies.ReadDispatch);
++        return app;
++    }
++
++    private static async Task<IResult> AvailableAsync(DateOnly date, string depot, DispatchDbContext db, CancellationToken cancellationToken)
++    {
++        var planned = await db.Routes
++            .Where(route => route.ServiceDate == date)
++            .Select(route => new { route.DriverId, route.VehicleId })
++            .ToListAsync(cancellationToken)
++            .ConfigureAwait(false);
++        var busyDrivers = planned.Select(route => route.DriverId).ToList();
++        var busyVehicles = planned.Select(route => route.VehicleId).ToList();
++        var normalisedDepot = depot.Trim().ToUpperInvariant();
++
++        var drivers = await db.Drivers
++            .Where(driver => driver.Active && driver.Depot == normalisedDepot && !busyDrivers.Contains(driver.Id))
++            .OrderBy(driver => driver.DisplayName)
++            .ToListAsync(cancellationToken)
++            .ConfigureAwait(false);
++        var vehicles = await db.Vehicles
++            .Where(vehicle => vehicle.Depot == normalisedDepot && !busyVehicles.Contains(vehicle.Id))
++            .OrderBy(vehicle => vehicle.Registration)
++            .ToListAsync(cancellationToken)
++            .ConfigureAwait(false);
++
++        return Results.Ok(new
++        {
++            drivers = drivers.Select(driver => new
++            {
++                id = driver.Id.Value,
++                driver.DisplayName,
++                licence = driver.Licence.ToString(),
++                driver.ShiftStart,
++                driver.ShiftEnd,
++            }),
++            vehicles = vehicles.Select(vehicle => new
++            {
++                id = vehicle.Id.Value,
++                vehicle.Registration,
++                kind = vehicle.Kind.ToString(),
++                vehicle.CapacityGrams,
++            }),
++        });
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Api/Hosting/ApiPipeline.cs b/src/Quellbrook.Dispatch.Api/Hosting/ApiPipeline.cs
+index d36724a..27b5bac 100644
+--- a/src/Quellbrook.Dispatch.Api/Hosting/ApiPipeline.cs
++++ b/src/Quellbrook.Dispatch.Api/Hosting/ApiPipeline.cs
+@@ -25,6 +25,7 @@ public static class ApiPipeline
+         app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") })
+             .AllowAnonymous();
+         app.MapDispatchEndpoints();
++        app.MapDriverEndpoints();
+         return app;
+     }
+ }

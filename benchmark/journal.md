@@ -61,3 +61,27 @@
   records (false-positive: not integration events → trap TRP-013); D39 IL size of the zone table (opinion → trap
   TRP-012); ED3 on HTTP request records and the error collector (false-positive; TRP-004 caught).
 - Key changes: traps TRP-009..TRP-013.
+
+## 2026-10-07 — scan iteration 2 (contained + model-judged host pass, local) and history packaging
+
+- Contained pass at `0565e07`: 30 results. The ED3 rows on the renamed event, the D8 rows and the CRAP row are gone
+  after the fixes. Recall 3/5 (DSP-001, DSP-002, DSP-005); DSP-003 still reported five lines early (judged in
+  iteration 1); traps caught as judged in iteration 1.
+- ED5 on `PlanRouteHandler` repeats although the handler now refuses a second route for a driver on a day (exists
+  check, unique index): **false-positive** now → trap TRP-014.
+- Model-judged host pass: D19 90, D20 80, D21 100, D22 100, D24 90, D25 100, M4 87. New rows:
+  - D25 scored the four ADRs "3 conform / 0 violate / 1 unverifiable": **DSP-004 missed** — the endpoint that takes
+    `DispatchDbContext` (`DriverEndpoints.cs`) contradicts ADR 0002 in the plainest way. Plant re-verified; false
+    negative. D7 claims "all 3 mechanizable ADRs are enforced: 2 by analyzers, 1 by tests" although the repository has
+    no architecture test and no analyzer rule for them (score-only, no row); recorded as an observation and as the
+    new band BND for `architecture-rules-unenforced` [0, 60] (set from the code: ADR 0002 is enforced by review only).
+  - D20 "ADR 0001 describes a meta-process" — **opinion-not-fact**: a decision to record decisions is the
+    conventional first ADR → trap TRP-015.
+  - M4 ×2 "README claims .NET 10 SDK / PostgreSQL 16 — not found in manifests" — **false-positive**: the SDK is pinned
+    in global.json and every project targets net10.0; the PostgreSQL major is an operating requirement the code
+    cannot show.
+- Release tags checked out and built in locked mode with tests: `v0.1.0` 56 + 6, `v0.2.0` 60 (+1 skipped) + 6,
+  `v0.3.0` 86 + 7.
+- `benchmark/history/`: 33 patches, `build-history.sh` (verified into a fresh directory: HEAD and three tags match),
+  README with the story notes marking the regression and the partial repair commit by commit.
+- Key changes: traps TRP-014, TRP-015; band `architecture-rules-unenforced`.

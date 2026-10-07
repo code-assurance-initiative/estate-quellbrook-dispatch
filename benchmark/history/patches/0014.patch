@@ -1,0 +1,210 @@
+From 25d754036217525ac5e261bf558c73a09c86c127 Mon Sep 17 00:00:00 2001
+From: Dario Fenwick <dario.fenwick@example.invalid>
+Date: Tue, 11 Aug 2026 16:48:37 +0200
+Subject: feat(express): same-day express assignment
+
+---
+ .../ApplicationServiceCollectionExtensions.cs |  1 +
+ .../Assignment/AssignConsignmentHandler.cs    |  8 +-
+ .../Assignment/ExpressAssignmentPolicy.cs     | 98 +++++++++++++++++++
+ .../Application/HandlerTests.cs               |  3 +-
+ .../Domain/ExpressAssignmentPolicyTests.cs    | 33 +++++++
+ 5 files changed, 140 insertions(+), 3 deletions(-)
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Domain/ExpressAssignmentPolicyTests.cs
+
+diff --git a/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs b/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs
+index d3dac2a..3549586 100644
+--- a/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs
++++ b/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs
+@@ -12,6 +12,7 @@ public static class ApplicationServiceCollectionExtensions
+     public static IServiceCollection AddDispatchApplication(this IServiceCollection services)
+     {
+         services.AddSingleton(new StandardAssignmentPolicy());
++        services.AddSingleton(new ExpressAssignmentPolicy(TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen")));
+         services.AddScoped<OrderPlacedHandler>();
+         services.AddScoped<AssignConsignmentHandler>();
+         services.AddScoped<PlanRouteHandler>();
+diff --git a/src/Quellbrook.Dispatch.Application/Assignment/AssignConsignmentHandler.cs b/src/Quellbrook.Dispatch.Application/Assignment/AssignConsignmentHandler.cs
+index 2849282..a0b579f 100644
+--- a/src/Quellbrook.Dispatch.Application/Assignment/AssignConsignmentHandler.cs
++++ b/src/Quellbrook.Dispatch.Application/Assignment/AssignConsignmentHandler.cs
+@@ -13,7 +13,9 @@ public sealed class AssignConsignmentHandler(
+     IConsignmentRepository consignments,
+     IRouteRepository routes,
+     StandardAssignmentPolicy standardPolicy,
+-    IUnitOfWork unitOfWork)
++    ExpressAssignmentPolicy expressPolicy,
++    IUnitOfWork unitOfWork,
++    TimeProvider time)
+ {
+     public async Task<OperationResult<RouteId>> HandleAsync(AssignConsignmentCommand command, CancellationToken cancellationToken)
+     {
+@@ -30,7 +32,9 @@ public sealed class AssignConsignmentHandler(
+         }
+ 
+         var candidates = await routes.CandidatesAsync(command.ServiceDate, cancellationToken).ConfigureAwait(false);
+-        var decision = standardPolicy.Choose(consignment, candidates, command.ServiceDate);
++        var decision = consignment.ServiceLevel == ServiceLevel.Express
++            ? expressPolicy.Choose(consignment, candidates, time.GetUtcNow())
++            : standardPolicy.Choose(consignment, candidates, command.ServiceDate);
+         if (decision.RouteId is not { } routeId)
+         {
+             return OperationResult.Conflict<RouteId>(decision.Reason ?? "No route available.");
+diff --git a/src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs b/src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs
+new file mode 100644
+index 0000000..80b8542
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs
+@@ -0,0 +1,98 @@
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Domain.Assignment;
++
++/// <summary>Same-day express service (ADR 0004).</summary>
++public sealed class ExpressAssignmentPolicy(
++    TimeZoneInfo depotTimeZone,
++    double minimumShiftHours = StandardAssignmentPolicy.DefaultMinimumShiftHours)
++{
++    public static readonly TimeOnly CutOff = new(14, 0);
++    public const double CapacityBuffer = 0.1;
++
++    public AssignmentDecision Choose(Consignment consignment, IReadOnlyList<RouteCandidate> candidates, DateTimeOffset now)
++    {
++        ArgumentNullException.ThrowIfNull(consignment);
++        ArgumentNullException.ThrowIfNull(candidates);
++        var local = TimeZoneInfo.ConvertTime(now, depotTimeZone);
++        var today = DateOnly.FromDateTime(local.DateTime);
++        var time = TimeOnly.FromDateTime(local.DateTime);
++        if (consignment.ServiceLevel != ServiceLevel.Express)
++        {
++            return AssignmentDecision.None("Not an express consignment.");
++        }
++
++        if (time > CutOff || local.DayOfWeek == DayOfWeek.Saturday || local.DayOfWeek == DayOfWeek.Sunday)
++        {
++            return AssignmentDecision.None($"The express cut-off ({CutOff:HH:mm} on working days) has passed.");
++        }
++
++        RouteCandidate? best = null;
++        var bestScore = int.MinValue;
++        foreach (var candidate in candidates)
++        {
++            var route = candidate.Route;
++            if (route.Status != RouteStatus.Planned || route.ServiceDate != today)
++            {
++                continue;
++            }
++
++            var sameZone = route.Zone == consignment.Zone;
++            if (!sameZone)
++            {
++                continue;
++            }
++
++            var remaining = candidate.Vehicle.CapacityGrams - route.LoadGrams;
++            if (remaining < consignment.TotalWeightGrams)
++            {
++                continue;
++            }
++
++            var driver = candidate.Driver;
++            if (!driver.Active || driver.ShiftHours < minimumShiftHours)
++            {
++                continue;
++            }
++
++            if (driver.Licence < candidate.Vehicle.RequiredLicence)
++            {
++                continue;
++            }
++
++            if (time < driver.ShiftStart || time >= driver.ShiftEnd.AddHours(-1))
++            {
++                continue;
++            }
++
++            if (remaining - consignment.TotalWeightGrams < candidate.Vehicle.CapacityGrams * CapacityBuffer && !route.Express)
++            {
++                continue;
++            }
++
++            var score = 0;
++            if (route.Express)
++            {
++                score += 100;
++            }
++
++            if (sameZone)
++            {
++                score += 50;
++            }
++
++            score -= route.Stops.Count * 5;
++            if (score > bestScore || (score == bestScore && best is not null && remaining < best.RemainingGrams))
++            {
++                best = candidate;
++                bestScore = score;
++            }
++        }
++
++        return best is null
++            ? AssignmentDecision.None($"No route can take express consignment {consignment.Id} today.")
++            : AssignmentDecision.To(best.Route.Id);
++    }
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Application/HandlerTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Application/HandlerTests.cs
+index d6858be..94496fc 100644
+--- a/tests/Quellbrook.Dispatch.UnitTests/Application/HandlerTests.cs
++++ b/tests/Quellbrook.Dispatch.UnitTests/Application/HandlerTests.cs
+@@ -175,7 +175,8 @@ public sealed class HandlerTests : IDisposable
+     private async Task<OperationResult<Quellbrook.Dispatch.Domain.Routes.RouteId>> AssignAsync(Guid consignmentId)
+     {
+         using var context = _fixture.Context();
+-        var handler = new AssignConsignmentHandler(new EfConsignmentRepository(context), new EfRouteRepository(context), new StandardAssignmentPolicy(), context);
++        var handler = new AssignConsignmentHandler(new EfConsignmentRepository(context), new EfRouteRepository(context), new StandardAssignmentPolicy(),
++            new ExpressAssignmentPolicy(TimeZoneInfo.Utc), context, _fixture.Time);
+         return await handler.HandleAsync(new AssignConsignmentCommand(consignmentId, DispatchData.Today), TestContext.Current.CancellationToken);
+     }
+ 
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Domain/ExpressAssignmentPolicyTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Domain/ExpressAssignmentPolicyTests.cs
+new file mode 100644
+index 0000000..8ef1ab6
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Domain/ExpressAssignmentPolicyTests.cs
+@@ -0,0 +1,33 @@
++using Quellbrook.Dispatch.Domain.Assignment;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.UnitTests.TestSupport;
++
++namespace Quellbrook.Dispatch.UnitTests.Domain;
++
++public sealed class ExpressAssignmentPolicyTests
++{
++    private readonly ExpressAssignmentPolicy _policy = new(TimeZoneInfo.Utc);
++
++    [Fact]
++    public void BeforeTheCutOffAnExpressConsignmentGoesOnTodaysExpressRun()
++    {
++        var morning = new DateTimeOffset(2026, 8, 12, 9, 0, 0, TimeSpan.Zero);
++        var standard = DispatchData.Candidate(date: DateOnly.FromDateTime(morning.Date));
++        var express = DispatchData.Candidate(express: true, date: DateOnly.FromDateTime(morning.Date));
++
++        var decision = _policy.Choose(DispatchData.Consignment(serviceLevel: ServiceLevel.Express), [standard, express], morning);
++
++        Assert.Equal(express.Route.Id, decision.RouteId);
++    }
++
++    [Fact]
++    public void AfterTheCutOffThereIsNoExpressRoute()
++    {
++        var afternoon = new DateTimeOffset(2026, 8, 12, 15, 0, 0, TimeSpan.Zero);
++        var express = DispatchData.Candidate(express: true, date: DateOnly.FromDateTime(afternoon.Date));
++
++        var decision = _policy.Choose(DispatchData.Consignment(serviceLevel: ServiceLevel.Express), [express], afternoon);
++
++        Assert.Null(decision.RouteId);
++    }
++}

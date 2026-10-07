@@ -1,0 +1,49 @@
+From 4b51436cb395b2d806957c9fb638a2082f0f55f4 Mon Sep 17 00:00:00 2001
+From: Kasper Nyholt <kasper.nyholt@example.invalid>
+Date: Fri, 4 Sep 2026 16:05:27 +0200
+Subject: release 0.3.0
+
+---
+ CHANGELOG.md          | 15 +++++++++++++++
+ Directory.Build.props |  2 +-
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 493f1a3..49fb4f3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,21 @@
+ All notable changes to this project are documented here. The format follows
+ [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
+ 
++## [0.3.0] - 2026-09-04
++
++### Added
++- JSON Schemas and an AsyncAPI document for the dispatch events; pinned copies of the consumed order schemas.
++
++### Changed
++- The express rules are split into the cut-off, driver hours, zone and vehicle fit; express stops are spread over
++  the morning's runs.
++- The out-for-delivery event types are named in the past tense (`ConsignmentSentOutForDelivery`); the routing key
++  `dispatch.consignment-out-for-delivery.v1` is unchanged.
++
++### Fixed
++- A driver can be planned on one route per day only.
++- The route capacity test no longer depends on the time of day (FLEET-212) and runs again.
++
+ ## [0.2.0] - 2026-08-21
+ 
+ ### Added
+diff --git a/Directory.Build.props b/Directory.Build.props
+index 6bd555c..93171ec 100644
+--- a/Directory.Build.props
++++ b/Directory.Build.props
+@@ -10,7 +10,7 @@
+     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+     <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+-    <Version>0.2.0</Version>
++    <Version>0.3.0</Version>
+     <Authors>Quellbrook Freight</Authors>
+     <Copyright>Copyright (c) 2026 Quellbrook Freight</Copyright>
+   </PropertyGroup>

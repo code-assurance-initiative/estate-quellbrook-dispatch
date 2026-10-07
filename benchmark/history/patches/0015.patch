@@ -1,0 +1,277 @@
+From c47d56ace1a075e23ee0370f0576170d180626e3 Mon Sep 17 00:00:00 2001
+From: Wendy Achterberg <wendy.achterberg@example.invalid>
+Date: Wed, 12 Aug 2026 11:06:58 +0200
+Subject: feat: drop the consignments of cancelled orders
+ (orders.order-cancelled.v1)
+
+---
+ .../ApplicationServiceCollectionExtensions.cs |  1 +
+ .../Intake/OrderCancelledHandler.cs           | 41 +++++++++++++++++++
+ .../Intake/OrderCancelledMessage.cs           |  7 ++++
+ .../Consignments/Consignment.cs               | 15 +++++++
+ .../Routes/Route.cs                           | 16 ++++++++
+ .../Inbox/InboxProcessor.cs                   |  4 ++
+ .../Messaging/OrderEventsConsumer.cs          |  2 +-
+ .../Domain/ConsignmentTests.cs                | 16 ++++++++
+ .../Domain/RouteAndFleetTests.cs              | 17 ++++++++
+ .../Infrastructure/InboxAndConsumerTests.cs   | 24 +++++++++++
+ .../TestSupport/DbFixture.cs                  |  1 +
+ 11 files changed, 143 insertions(+), 1 deletion(-)
+ create mode 100644 src/Quellbrook.Dispatch.Application/Intake/OrderCancelledHandler.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/Intake/OrderCancelledMessage.cs
+
+diff --git a/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs b/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs
+index 3549586..436dbdb 100644
+--- a/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs
++++ b/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs
+@@ -14,6 +14,7 @@ public static class ApplicationServiceCollectionExtensions
+         services.AddSingleton(new StandardAssignmentPolicy());
+         services.AddSingleton(new ExpressAssignmentPolicy(TimeZoneInfo.FindSystemTimeZoneById("Europe/Copenhagen")));
+         services.AddScoped<OrderPlacedHandler>();
++        services.AddScoped<OrderCancelledHandler>();
+         services.AddScoped<AssignConsignmentHandler>();
+         services.AddScoped<PlanRouteHandler>();
+         services.AddScoped<StartRouteHandler>();
+diff --git a/src/Quellbrook.Dispatch.Application/Intake/OrderCancelledHandler.cs b/src/Quellbrook.Dispatch.Application/Intake/OrderCancelledHandler.cs
+new file mode 100644
+index 0000000..ae346d7
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Intake/OrderCancelledHandler.cs
+@@ -0,0 +1,41 @@
++using Microsoft.Extensions.Logging;
++using Quellbrook.Dispatch.Application.Abstractions;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Application.Intake;
++
++/// <summary>Drops the consignment of a cancelled order, and its stop if it was on a route that has not left yet.</summary>
++public sealed partial class OrderCancelledHandler(
++    IConsignmentRepository consignments,
++    IRouteRepository routes,
++    IUnitOfWork unitOfWork,
++    ILogger<OrderCancelledHandler> logger)
++{
++    public async Task HandleAsync(OrderCancelledMessage message, CancellationToken cancellationToken)
++    {
++        ArgumentNullException.ThrowIfNull(message);
++        var consignment = await consignments.FindByOrderAsync(message.OrderId, cancellationToken).ConfigureAwait(false);
++        if (consignment is null || consignment.Status == ConsignmentStatus.Cancelled)
++        {
++            return;
++        }
++
++        if (consignment.Status is ConsignmentStatus.OutForDelivery or ConsignmentStatus.Delivered)
++        {
++            LogTooLate(message.OrderId, consignment.Status);
++            return;
++        }
++
++        if (consignment.RouteId is { } routeId && await routes.FindAsync(routeId, cancellationToken).ConfigureAwait(false) is { } route)
++        {
++            route.RemoveStop(consignment.Id);
++        }
++
++        consignment.Cancel();
++        await unitOfWork.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++    }
++
++    [LoggerMessage(Level = LogLevel.Warning, Message = "Order {OrderId} was cancelled but its consignment is already {Status}; the driver returns it")]
++    private partial void LogTooLate(Guid orderId, ConsignmentStatus status);
++}
+diff --git a/src/Quellbrook.Dispatch.Application/Intake/OrderCancelledMessage.cs b/src/Quellbrook.Dispatch.Application/Intake/OrderCancelledMessage.cs
+new file mode 100644
+index 0000000..9cd9b88
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Intake/OrderCancelledMessage.cs
+@@ -0,0 +1,7 @@
++namespace Quellbrook.Dispatch.Application.Intake;
++
++/// <summary>Dispatch's copy of the order service's <c>orders.order-cancelled.v1</c> payload.</summary>
++public sealed record OrderCancelledMessage(Guid OrderId, string Reason, DateTimeOffset CancelledAt)
++{
++    public const string EventType = "orders.order-cancelled.v1";
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs b/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs
+index ff0d0b6..3bbe3cb 100644
+--- a/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs
+@@ -112,6 +112,21 @@ public sealed class Consignment : AggregateRoot
+         Raise(new ConsignmentDelivered(Id, OrderId, proof, at));
+     }
+ 
++    /// <summary>
++    /// The order was cancelled before the consignment left the depot; it drops off its route. Once it is out for
++    /// delivery the driver brings it back and the cancellation is handled by hand.
++    /// </summary>
++    public void Cancel()
++    {
++        if (Status is not (ConsignmentStatus.AwaitingRoute or ConsignmentStatus.Assigned))
++        {
++            throw new DomainException($"Consignment {Id} is {Status} and cannot be cancelled.");
++        }
++
++        Status = ConsignmentStatus.Cancelled;
++        RouteId = null;
++    }
++
+     private void EnsureStatus(ConsignmentStatus expected, string action)
+     {
+         if (Status != expected)
+diff --git a/src/Quellbrook.Dispatch.Domain/Routes/Route.cs b/src/Quellbrook.Dispatch.Domain/Routes/Route.cs
+index 7c366a8..55d0eac 100644
+--- a/src/Quellbrook.Dispatch.Domain/Routes/Route.cs
++++ b/src/Quellbrook.Dispatch.Domain/Routes/Route.cs
+@@ -76,6 +76,22 @@ public sealed class Route : AggregateRoot
+         consignment.AssignTo(Id);
+     }
+ 
++    /// <summary>Takes a cancelled consignment off the route and renumbers the stops after it.</summary>
++    public void RemoveStop(ConsignmentId consignmentId)
++    {
++        EnsurePlanned();
++        var removed = _stops.RemoveAll(stop => stop.ConsignmentId == consignmentId);
++        if (removed == 0)
++        {
++            throw new DomainException($"Consignment {consignmentId} is not on route {Id}.");
++        }
++
++        for (var i = 0; i < _stops.Count; i++)
++        {
++            _stops[i] = _stops[i] with { Sequence = i + 1 };
++        }
++    }
++
+     public void Start(IEnumerable<Consignment> consignments, DateTimeOffset at)
+     {
+         ArgumentNullException.ThrowIfNull(consignments);
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxProcessor.cs b/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxProcessor.cs
+index 850c8fe..5e94975 100644
+--- a/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxProcessor.cs
++++ b/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxProcessor.cs
+@@ -52,6 +52,10 @@ public sealed partial class InboxProcessor(IServiceScopeFactory scopes, TimeProv
+                 await services.GetRequiredService<OrderPlacedHandler>()
+                     .HandleAsync(Deserialize<OrderPlacedMessage>(body), cancellationToken).ConfigureAwait(false);
+                 return true;
++            case OrderCancelledMessage.EventType:
++                await services.GetRequiredService<OrderCancelledHandler>()
++                    .HandleAsync(Deserialize<OrderCancelledMessage>(body), cancellationToken).ConfigureAwait(false);
++                return true;
+             default:
+                 return false;
+         }
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Messaging/OrderEventsConsumer.cs b/src/Quellbrook.Dispatch.Infrastructure/Messaging/OrderEventsConsumer.cs
+index ea659d9..1953931 100644
+--- a/src/Quellbrook.Dispatch.Infrastructure/Messaging/OrderEventsConsumer.cs
++++ b/src/Quellbrook.Dispatch.Infrastructure/Messaging/OrderEventsConsumer.cs
+@@ -21,7 +21,7 @@ public sealed partial class OrderEventsConsumer(
+     public const string QueueName = "dispatch.order-events";
+     public const string DeadLetterExchange = "quellbrook.dead-letter";
+ 
+-    public static readonly IReadOnlyList<string> RoutingKeys = ["orders.order-placed.v1"];
++    public static readonly IReadOnlyList<string> RoutingKeys = ["orders.order-placed.v1", "orders.order-cancelled.v1"];
+ 
+     public async Task HandleAsync(IChannel channel, BasicDeliverEventArgs delivery, CancellationToken cancellationToken)
+     {
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs
+index 8bf41b1..b919565 100644
+--- a/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs
++++ b/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs
+@@ -58,6 +58,22 @@ public sealed class ConsignmentTests
+         Assert.Throws<DomainException>(() => consignment.AssignTo(new RouteId(Guid.NewGuid())));
+     }
+ 
++    [Fact]
++    public void AnAssignedConsignmentCanBeCancelledButNotOnceItIsOut()
++    {
++        var assigned = DispatchData.Consignment();
++        assigned.AssignTo(new RouteId(Guid.NewGuid()));
++        var outForDelivery = DispatchData.Consignment();
++        outForDelivery.AssignTo(new RouteId(Guid.NewGuid()));
++        outForDelivery.MarkOutForDelivery(DispatchData.Now);
++
++        assigned.Cancel();
++
++        Assert.Equal(ConsignmentStatus.Cancelled, assigned.Status);
++        Assert.Null(assigned.RouteId);
++        Assert.Throws<DomainException>(outForDelivery.Cancel);
++    }
++
+     [Theory]
+     [InlineData("DK", "1050", "DK-CPH-C")]
+     [InlineData("DK", "2300", "DK-CPH-S")]
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Domain/RouteAndFleetTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Domain/RouteAndFleetTests.cs
+index c6aa5aa..1467dbf 100644
+--- a/tests/Quellbrook.Dispatch.UnitTests/Domain/RouteAndFleetTests.cs
++++ b/tests/Quellbrook.Dispatch.UnitTests/Domain/RouteAndFleetTests.cs
+@@ -38,6 +38,23 @@ public sealed class RouteAndFleetTests
+         Assert.Throws<DomainException>(() => route.AddStop(DispatchData.Consignment()));
+     }
+ 
++    [Fact]
++    public void RemovingAStopRenumbersTheOnesAfterIt()
++    {
++        var route = DispatchData.Candidate().Route;
++        var consignments = new[] { DispatchData.Consignment(), DispatchData.Consignment(), DispatchData.Consignment() };
++        foreach (var consignment in consignments)
++        {
++            route.AddStop(consignment);
++        }
++
++        route.RemoveStop(consignments[0].Id);
++
++        Assert.Equal([1, 2], route.Stops.Select(stop => stop.Sequence));
++        Assert.Equal(consignments[1].Id, route.Stops[0].ConsignmentId);
++        Assert.Throws<DomainException>(() => route.RemoveStop(consignments[0].Id));
++    }
++
+     [Fact]
+     public void AnEmptyRouteCannotStart() =>
+         Assert.Throws<DomainException>(() => DispatchData.Candidate().Route.Start([], DispatchData.Now));
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/InboxAndConsumerTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/InboxAndConsumerTests.cs
+index 9c07e99..93df232 100644
+--- a/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/InboxAndConsumerTests.cs
++++ b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/InboxAndConsumerTests.cs
+@@ -42,6 +42,30 @@ public sealed class InboxAndConsumerTests : IDisposable
+         Assert.Equal(messageId, (await context.InboxMessages.SingleAsync(TestContext.Current.CancellationToken)).MessageId);
+     }
+ 
++    [Fact]
++    public async Task ACancelledOrderDropsItsConsignmentFromTheRoute()
++    {
++        await Inbox().ProcessAsync(Guid.NewGuid(), "orders.order-placed.v1", Encoding.UTF8.GetBytes(OrderPlaced), TestContext.Current.CancellationToken);
++        var candidate = DispatchData.Candidate();
++        using (var context = _fixture.Context())
++        {
++            var consignment = await context.Consignments.SingleAsync(TestContext.Current.CancellationToken);
++            context.Drivers.Add(candidate.Driver);
++            context.Vehicles.Add(candidate.Vehicle);
++            context.Routes.Add(candidate.Route);
++            candidate.Route.AddStop(consignment);
++            await context.SaveChangesAsync(TestContext.Current.CancellationToken);
++        }
++
++        var cancelled = """{"orderId":"0198f1a2-0000-7000-8000-000000000042","reason":"Shipper withdrew the order","cancelledAt":"2026-08-03T07:00:00+00:00"}""";
++        var outcome = await Inbox().ProcessAsync(Guid.NewGuid(), "orders.order-cancelled.v1", Encoding.UTF8.GetBytes(cancelled), TestContext.Current.CancellationToken);
++
++        Assert.Equal(InboxOutcome.Processed, outcome);
++        using var reading = _fixture.Context();
++        Assert.Equal(Quellbrook.Dispatch.Domain.Consignments.ConsignmentStatus.Cancelled, (await reading.Consignments.SingleAsync(TestContext.Current.CancellationToken)).Status);
++        Assert.Empty((await reading.Routes.SingleAsync(TestContext.Current.CancellationToken)).Stops);
++    }
++
+     [Fact]
+     public async Task AnUnknownEventTypeIsRecordedAndIgnored()
+     {
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/TestSupport/DbFixture.cs b/tests/Quellbrook.Dispatch.UnitTests/TestSupport/DbFixture.cs
+index 1ba2c00..539b542 100644
+--- a/tests/Quellbrook.Dispatch.UnitTests/TestSupport/DbFixture.cs
++++ b/tests/Quellbrook.Dispatch.UnitTests/TestSupport/DbFixture.cs
+@@ -26,6 +26,7 @@ internal sealed class DbFixture : IDisposable
+             .AddSingleton<TimeProvider>(Time)
+             .AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(NullLogger<>))
+             .AddScoped<OrderPlacedHandler>()
++            .AddScoped<OrderCancelledHandler>()
+             .BuildServiceProvider();
+     }
+ 

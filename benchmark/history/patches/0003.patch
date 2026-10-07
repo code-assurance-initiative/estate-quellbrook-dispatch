@@ -1,0 +1,934 @@
+From 657cde8f79f6aac671bf5ba4a589cd3e9240401e Mon Sep 17 00:00:00 2001
+From: Wendy Achterberg <wendy.achterberg@example.invalid>
+Date: Tue, 28 Jul 2026 09:44:30 +0200
+Subject: feat(domain): consignments, delivery zones, routes, drivers and
+ vehicles
+
+---
+ .../Common/AggregateRoot.cs                   |  13 ++
+ .../Common/DomainException.cs                 |  19 +++
+ .../Common/IDomainEvent.cs                    |   7 +
+ .../Consignments/Consignment.cs               | 122 ++++++++++++++++++
+ .../Consignments/ConsignmentId.cs             |   6 +
+ .../Consignments/ConsignmentStatus.cs         |  10 ++
+ .../Consignments/DeliveryProof.cs             |   8 ++
+ .../Consignments/DeliveryZones.cs             |  39 ++++++
+ .../Consignments/Events.cs                    |  16 +++
+ .../Consignments/IConsignmentRepository.cs    |  12 ++
+ .../Consignments/ServiceLevel.cs              |   7 +
+ .../Fleet/Driver.cs                           |  49 +++++++
+ .../Fleet/DriverId.cs                         |  11 ++
+ .../Fleet/IFleetRepository.cs                 |  12 ++
+ .../Fleet/LicenceCategory.cs                  |  14 ++
+ .../Fleet/Vehicle.cs                          |  41 ++++++
+ .../Fleet/VehicleKind.cs                      |   7 +
+ .../Routes/IRouteRepository.cs                |  11 ++
+ .../Routes/Route.cs                           | 103 +++++++++++++++
+ .../Routes/RouteId.cs                         |   6 +
+ .../Routes/RouteStatus.cs                     |   7 +
+ .../Routes/RouteStop.cs                       |   6 +
+ .../Domain/ConsignmentTests.cs                |  77 +++++++++++
+ .../Domain/RouteAndFleetTests.cs              |  75 +++++++++++
+ .../TestSupport/DispatchData.cs               |  47 +++++++
+ 25 files changed, 725 insertions(+)
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Common/AggregateRoot.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Common/DomainException.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Common/IDomainEvent.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Consignments/ConsignmentId.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Consignments/ConsignmentStatus.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Consignments/DeliveryProof.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Consignments/DeliveryZones.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Consignments/Events.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Consignments/IConsignmentRepository.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Consignments/ServiceLevel.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Fleet/Driver.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Fleet/DriverId.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Fleet/IFleetRepository.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Fleet/LicenceCategory.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Fleet/Vehicle.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Fleet/VehicleKind.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Routes/IRouteRepository.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Routes/Route.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Routes/RouteId.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Routes/RouteStatus.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Routes/RouteStop.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Domain/RouteAndFleetTests.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/TestSupport/DispatchData.cs
+
+diff --git a/src/Quellbrook.Dispatch.Domain/Common/AggregateRoot.cs b/src/Quellbrook.Dispatch.Domain/Common/AggregateRoot.cs
+new file mode 100644
+index 0000000..24eb9d1
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Common/AggregateRoot.cs
+@@ -0,0 +1,13 @@
++namespace Quellbrook.Dispatch.Domain.Common;
++
++/// <summary>Base of every aggregate root: collects the domain events raised by one unit of work.</summary>
++public abstract class AggregateRoot
++{
++    private readonly List<IDomainEvent> _domainEvents = [];
++
++    public IReadOnlyList<IDomainEvent> DomainEvents => _domainEvents;
++
++    public void ClearDomainEvents() => _domainEvents.Clear();
++
++    protected void Raise(IDomainEvent domainEvent) => _domainEvents.Add(domainEvent);
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Common/DomainException.cs b/src/Quellbrook.Dispatch.Domain/Common/DomainException.cs
+new file mode 100644
+index 0000000..8434eeb
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Common/DomainException.cs
+@@ -0,0 +1,19 @@
++namespace Quellbrook.Dispatch.Domain.Common;
++
++/// <summary>A business rule was broken; the message is safe to show to the caller.</summary>
++public sealed class DomainException : Exception
++{
++    public DomainException()
++    {
++    }
++
++    public DomainException(string message)
++        : base(message)
++    {
++    }
++
++    public DomainException(string message, Exception innerException)
++        : base(message, innerException)
++    {
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Common/IDomainEvent.cs b/src/Quellbrook.Dispatch.Domain/Common/IDomainEvent.cs
+new file mode 100644
+index 0000000..1a27384
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Common/IDomainEvent.cs
+@@ -0,0 +1,7 @@
++namespace Quellbrook.Dispatch.Domain.Common;
++
++/// <summary>Something that happened to an aggregate, in the past tense.</summary>
++public interface IDomainEvent
++{
++    DateTimeOffset OccurredAt { get; }
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs b/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs
+new file mode 100644
+index 0000000..ff0d0b6
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs
+@@ -0,0 +1,122 @@
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Domain.Consignments;
++
++/// <summary>
++/// The parcels of one order, as dispatch sees them: where they go, how heavy they are, and how far they got. Created
++/// when the order service announces the order.
++/// </summary>
++public sealed class Consignment : AggregateRoot
++{
++    private Consignment(
++        ConsignmentId id,
++        Guid orderId,
++        ServiceLevel serviceLevel,
++        string countryCode,
++        string postalCode,
++        string zone,
++        int parcelCount,
++        int totalWeightGrams,
++        DateTimeOffset receivedAt)
++    {
++        Id = id;
++        OrderId = orderId;
++        ServiceLevel = serviceLevel;
++        CountryCode = countryCode;
++        PostalCode = postalCode;
++        Zone = zone;
++        ParcelCount = parcelCount;
++        TotalWeightGrams = totalWeightGrams;
++        ReceivedAt = receivedAt;
++        Status = ConsignmentStatus.AwaitingRoute;
++    }
++
++    public ConsignmentId Id { get; private set; }
++
++    /// <summary>The order in the order service this consignment delivers.</summary>
++    public Guid OrderId { get; private set; }
++
++    public ServiceLevel ServiceLevel { get; private set; }
++
++    public string CountryCode { get; private set; }
++
++    public string PostalCode { get; private set; }
++
++    public string Zone { get; private set; }
++
++    public int ParcelCount { get; private set; }
++
++    public int TotalWeightGrams { get; private set; }
++
++    public DateTimeOffset ReceivedAt { get; private set; }
++
++    public ConsignmentStatus Status { get; private set; }
++
++    public RouteId? RouteId { get; private set; }
++
++    public DateTimeOffset? OutForDeliveryAt { get; private set; }
++
++    public DateTimeOffset? DeliveredAt { get; private set; }
++
++    public DeliveryProof? Proof { get; private set; }
++
++    public static Consignment Receive(
++        ConsignmentId id,
++        Guid orderId,
++        ServiceLevel serviceLevel,
++        string countryCode,
++        string postalCode,
++        IReadOnlyCollection<int> parcelWeightsGrams,
++        DateTimeOffset receivedAt)
++    {
++        ArgumentNullException.ThrowIfNull(parcelWeightsGrams);
++        if (parcelWeightsGrams.Count == 0 || parcelWeightsGrams.Any(weight => weight <= 0))
++        {
++            throw new DomainException("A consignment has at least one parcel, each with a positive weight.");
++        }
++
++        return new Consignment(
++            id,
++            orderId,
++            serviceLevel,
++            countryCode,
++            postalCode,
++            DeliveryZones.ZoneFor(countryCode, postalCode),
++            parcelWeightsGrams.Count,
++            parcelWeightsGrams.Sum(),
++            receivedAt);
++    }
++
++    public void AssignTo(RouteId routeId)
++    {
++        EnsureStatus(ConsignmentStatus.AwaitingRoute, "assigned to a route");
++        RouteId = routeId;
++        Status = ConsignmentStatus.Assigned;
++    }
++
++    public void MarkOutForDelivery(DateTimeOffset at)
++    {
++        EnsureStatus(ConsignmentStatus.Assigned, "sent out for delivery");
++        Status = ConsignmentStatus.OutForDelivery;
++        OutForDeliveryAt = at;
++        Raise(new ConsignmentOutForDelivery(Id, OrderId, RouteId ?? throw new InvalidOperationException("Assigned without a route."), at));
++    }
++
++    public void RecordDelivery(DeliveryProof proof, DateTimeOffset at)
++    {
++        EnsureStatus(ConsignmentStatus.OutForDelivery, "delivered");
++        Status = ConsignmentStatus.Delivered;
++        DeliveredAt = at;
++        Proof = proof;
++        Raise(new ConsignmentDelivered(Id, OrderId, proof, at));
++    }
++
++    private void EnsureStatus(ConsignmentStatus expected, string action)
++    {
++        if (Status != expected)
++        {
++            throw new DomainException($"Consignment {Id} is {Status} and cannot be {action}.");
++        }
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/ConsignmentId.cs b/src/Quellbrook.Dispatch.Domain/Consignments/ConsignmentId.cs
+new file mode 100644
+index 0000000..a0e042e
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/ConsignmentId.cs
+@@ -0,0 +1,6 @@
++namespace Quellbrook.Dispatch.Domain.Consignments;
++
++public readonly record struct ConsignmentId(Guid Value)
++{
++    public override string ToString() => Value.ToString();
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/ConsignmentStatus.cs b/src/Quellbrook.Dispatch.Domain/Consignments/ConsignmentStatus.cs
+new file mode 100644
+index 0000000..1eb1d5d
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/ConsignmentStatus.cs
+@@ -0,0 +1,10 @@
++namespace Quellbrook.Dispatch.Domain.Consignments;
++
++public enum ConsignmentStatus
++{
++    AwaitingRoute = 0,
++    Assigned = 1,
++    OutForDelivery = 2,
++    Delivered = 3,
++    Cancelled = 4,
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/DeliveryProof.cs b/src/Quellbrook.Dispatch.Domain/Consignments/DeliveryProof.cs
+new file mode 100644
+index 0000000..4826695
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/DeliveryProof.cs
+@@ -0,0 +1,8 @@
++namespace Quellbrook.Dispatch.Domain.Consignments;
++
++public enum DeliveryProof
++{
++    Signature = 0,
++    Photo = 1,
++    SafePlace = 2,
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/DeliveryZones.cs b/src/Quellbrook.Dispatch.Domain/Consignments/DeliveryZones.cs
+new file mode 100644
+index 0000000..14f2d12
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/DeliveryZones.cs
+@@ -0,0 +1,39 @@
++namespace Quellbrook.Dispatch.Domain.Consignments;
++
++/// <summary>
++/// The delivery zones the depots plan routes for, by country and the first two characters of the postal code. The
++/// table is maintained by the Fleet team with the depot managers; a district not in it is served from the
++/// country's catch-all zone.
++/// </summary>
++public static class DeliveryZones
++{
++    public static string ZoneFor(string countryCode, string postalCode)
++    {
++        ArgumentNullException.ThrowIfNull(postalCode);
++        var district = postalCode.Length >= 2 ? postalCode[..2] : postalCode;
++        return (countryCode, district) switch
++        {
++            ("DK", "10" or "11" or "12" or "13" or "14" or "15") => "DK-CPH-C",
++            ("DK", "20" or "21" or "22" or "23" or "24" or "25" or "26") => "DK-CPH-S",
++            ("DK", "27" or "28" or "29" or "30") => "DK-CPH-N",
++            ("DK", "40" or "41" or "42" or "43") => "DK-ZEA",
++            ("DK", "50" or "51" or "52" or "53" or "54" or "55") => "DK-FYN",
++            ("DK", "60" or "61" or "62" or "63" or "64" or "65" or "66" or "67") => "DK-JUT-S",
++            ("DK", "70" or "71" or "72" or "73" or "74" or "75") => "DK-JUT-C",
++            ("DK", "80" or "81" or "82" or "83" or "84" or "85" or "86" or "87" or "88") => "DK-AAR",
++            ("DK", "90" or "91" or "92" or "93" or "94" or "95" or "96" or "97" or "98" or "99") => "DK-JUT-N",
++            ("DK", _) => "DK-OTHER",
++            ("SE", "21" or "22" or "23" or "24") => "SE-MAL",
++            ("SE", "40" or "41" or "42" or "43") => "SE-GOT",
++            ("SE", _) => "SE-OTHER",
++            ("NO", "01" or "02" or "03" or "04" or "05" or "06" or "07" or "08" or "09") => "NO-OSL",
++            ("NO", _) => "NO-OTHER",
++            ("DE", "20" or "21" or "22") => "DE-HAM",
++            ("DE", "24" or "25") => "DE-KIE",
++            ("DE", _) => "DE-OTHER",
++            ("NL", "10" or "11") => "NL-AMS",
++            ("NL", _) => "NL-OTHER",
++            _ => throw new ArgumentOutOfRangeException(nameof(countryCode), countryCode, "No delivery zones for this country."),
++        };
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/Events.cs b/src/Quellbrook.Dispatch.Domain/Consignments/Events.cs
+new file mode 100644
+index 0000000..05f5b3a
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/Events.cs
+@@ -0,0 +1,16 @@
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Domain.Consignments;
++
++public sealed record ConsignmentOutForDelivery(
++    ConsignmentId ConsignmentId,
++    Guid OrderId,
++    RouteId RouteId,
++    DateTimeOffset OccurredAt) : IDomainEvent;
++
++public sealed record ConsignmentDelivered(
++    ConsignmentId ConsignmentId,
++    Guid OrderId,
++    DeliveryProof Proof,
++    DateTimeOffset OccurredAt) : IDomainEvent;
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/IConsignmentRepository.cs b/src/Quellbrook.Dispatch.Domain/Consignments/IConsignmentRepository.cs
+new file mode 100644
+index 0000000..869a072
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/IConsignmentRepository.cs
+@@ -0,0 +1,12 @@
++namespace Quellbrook.Dispatch.Domain.Consignments;
++
++public interface IConsignmentRepository
++{
++    Task<Consignment?> FindAsync(ConsignmentId id, CancellationToken cancellationToken);
++
++    Task<Consignment?> FindByOrderAsync(Guid orderId, CancellationToken cancellationToken);
++
++    Task<IReadOnlyList<Consignment>> OnRouteAsync(Routes.RouteId routeId, CancellationToken cancellationToken);
++
++    void Add(Consignment consignment);
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/ServiceLevel.cs b/src/Quellbrook.Dispatch.Domain/Consignments/ServiceLevel.cs
+new file mode 100644
+index 0000000..32831db
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/ServiceLevel.cs
+@@ -0,0 +1,7 @@
++namespace Quellbrook.Dispatch.Domain.Consignments;
++
++public enum ServiceLevel
++{
++    Standard = 0,
++    Express = 1,
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Fleet/Driver.cs b/src/Quellbrook.Dispatch.Domain/Fleet/Driver.cs
+new file mode 100644
+index 0000000..322c112
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Fleet/Driver.cs
+@@ -0,0 +1,49 @@
++using Quellbrook.Dispatch.Domain.Common;
++
++namespace Quellbrook.Dispatch.Domain.Fleet;
++
++/// <summary>A driver of a depot, with the licence they hold and the daily shift they work.</summary>
++public sealed class Driver
++{
++    private Driver(DriverId id, string displayName, string depot, LicenceCategory licence, TimeOnly shiftStart, TimeOnly shiftEnd)
++    {
++        Id = id;
++        DisplayName = displayName;
++        Depot = depot;
++        Licence = licence;
++        ShiftStart = shiftStart;
++        ShiftEnd = shiftEnd;
++        Active = true;
++    }
++
++    public DriverId Id { get; private set; }
++
++    /// <summary>First name and initial, as shown on the dispatch board.</summary>
++    public string DisplayName { get; private set; }
++
++    public string Depot { get; private set; }
++
++    public LicenceCategory Licence { get; private set; }
++
++    public TimeOnly ShiftStart { get; private set; }
++
++    public TimeOnly ShiftEnd { get; private set; }
++
++    public bool Active { get; private set; }
++
++    public double ShiftHours => (ShiftEnd - ShiftStart).TotalHours;
++
++    public static Driver Register(DriverId id, string displayName, string depot, LicenceCategory licence, TimeOnly shiftStart, TimeOnly shiftEnd)
++    {
++        ArgumentException.ThrowIfNullOrWhiteSpace(displayName);
++        ArgumentException.ThrowIfNullOrWhiteSpace(depot);
++        if (shiftEnd <= shiftStart)
++        {
++            throw new DomainException("A shift ends after it starts.");
++        }
++
++        return new Driver(id, displayName.Trim(), depot.Trim().ToUpperInvariant(), licence, shiftStart, shiftEnd);
++    }
++
++    public void Deactivate() => Active = false;
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Fleet/DriverId.cs b/src/Quellbrook.Dispatch.Domain/Fleet/DriverId.cs
+new file mode 100644
+index 0000000..b56cc13
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Fleet/DriverId.cs
+@@ -0,0 +1,11 @@
++namespace Quellbrook.Dispatch.Domain.Fleet;
++
++public readonly record struct DriverId(Guid Value)
++{
++    public override string ToString() => Value.ToString();
++}
++
++public readonly record struct VehicleId(Guid Value)
++{
++    public override string ToString() => Value.ToString();
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Fleet/IFleetRepository.cs b/src/Quellbrook.Dispatch.Domain/Fleet/IFleetRepository.cs
+new file mode 100644
+index 0000000..23e1be3
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Fleet/IFleetRepository.cs
+@@ -0,0 +1,12 @@
++namespace Quellbrook.Dispatch.Domain.Fleet;
++
++public interface IFleetRepository
++{
++    Task<Driver?> FindDriverAsync(DriverId id, CancellationToken cancellationToken);
++
++    Task<Vehicle?> FindVehicleAsync(VehicleId id, CancellationToken cancellationToken);
++
++    void Add(Driver driver);
++
++    void Add(Vehicle vehicle);
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Fleet/LicenceCategory.cs b/src/Quellbrook.Dispatch.Domain/Fleet/LicenceCategory.cs
+new file mode 100644
+index 0000000..2d57473
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Fleet/LicenceCategory.cs
+@@ -0,0 +1,14 @@
++namespace Quellbrook.Dispatch.Domain.Fleet;
++
++/// <summary>Driving-licence categories, in increasing order of what they allow.</summary>
++public enum LicenceCategory
++{
++    /// <summary>Vans up to 3.5 t.</summary>
++    B = 0,
++
++    /// <summary>Light rigid trucks up to 7.5 t.</summary>
++    C1 = 1,
++
++    /// <summary>Rigid trucks.</summary>
++    C = 2,
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Fleet/Vehicle.cs b/src/Quellbrook.Dispatch.Domain/Fleet/Vehicle.cs
+new file mode 100644
+index 0000000..692207e
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Fleet/Vehicle.cs
+@@ -0,0 +1,41 @@
++using Quellbrook.Dispatch.Domain.Common;
++
++namespace Quellbrook.Dispatch.Domain.Fleet;
++
++/// <summary>A delivery vehicle of a depot and the payload it may carry.</summary>
++public sealed class Vehicle
++{
++    private Vehicle(VehicleId id, string registration, string depot, VehicleKind kind, int capacityGrams)
++    {
++        Id = id;
++        Registration = registration;
++        Depot = depot;
++        Kind = kind;
++        CapacityGrams = capacityGrams;
++    }
++
++    public VehicleId Id { get; private set; }
++
++    public string Registration { get; private set; }
++
++    public string Depot { get; private set; }
++
++    public VehicleKind Kind { get; private set; }
++
++    public int CapacityGrams { get; private set; }
++
++    /// <summary>The licence a driver needs for this vehicle.</summary>
++    public LicenceCategory RequiredLicence => Kind == VehicleKind.Rigid ? LicenceCategory.C1 : LicenceCategory.B;
++
++    public static Vehicle Register(VehicleId id, string registration, string depot, VehicleKind kind, int capacityGrams)
++    {
++        ArgumentException.ThrowIfNullOrWhiteSpace(registration);
++        ArgumentException.ThrowIfNullOrWhiteSpace(depot);
++        if (capacityGrams is <= 0 or > 7_500_000)
++        {
++            throw new DomainException("A vehicle carries between 1 g and 7.5 t.");
++        }
++
++        return new Vehicle(id, registration.Trim().ToUpperInvariant(), depot.Trim().ToUpperInvariant(), kind, capacityGrams);
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Fleet/VehicleKind.cs b/src/Quellbrook.Dispatch.Domain/Fleet/VehicleKind.cs
+new file mode 100644
+index 0000000..3e9632d
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Fleet/VehicleKind.cs
+@@ -0,0 +1,7 @@
++namespace Quellbrook.Dispatch.Domain.Fleet;
++
++public enum VehicleKind
++{
++    Van = 0,
++    Rigid = 1,
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Routes/IRouteRepository.cs b/src/Quellbrook.Dispatch.Domain/Routes/IRouteRepository.cs
+new file mode 100644
+index 0000000..9b56051
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Routes/IRouteRepository.cs
+@@ -0,0 +1,11 @@
++namespace Quellbrook.Dispatch.Domain.Routes;
++
++public interface IRouteRepository
++{
++    Task<Route?> FindAsync(RouteId id, CancellationToken cancellationToken);
++
++    /// <summary>Planned routes of a day, with the vehicle and driver each one uses.</summary>
++    Task<IReadOnlyList<Assignment.RouteCandidate>> CandidatesAsync(DateOnly serviceDate, CancellationToken cancellationToken);
++
++    void Add(Route route);
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Routes/Route.cs b/src/Quellbrook.Dispatch.Domain/Routes/Route.cs
+new file mode 100644
+index 0000000..7c366a8
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Routes/Route.cs
+@@ -0,0 +1,103 @@
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Fleet;
++
++namespace Quellbrook.Dispatch.Domain.Routes;
++
++/// <summary>One driver and one vehicle delivering in one zone on one day.</summary>
++public sealed class Route : AggregateRoot
++{
++    private readonly List<RouteStop> _stops = [];
++
++    private Route(RouteId id, string depot, string zone, DateOnly serviceDate, DriverId driverId, VehicleId vehicleId, bool express)
++    {
++        Id = id;
++        Depot = depot;
++        Zone = zone;
++        ServiceDate = serviceDate;
++        DriverId = driverId;
++        VehicleId = vehicleId;
++        Express = express;
++        Status = RouteStatus.Planned;
++    }
++
++    public RouteId Id { get; private set; }
++
++    public string Depot { get; private set; }
++
++    public string Zone { get; private set; }
++
++    public DateOnly ServiceDate { get; private set; }
++
++    public DriverId DriverId { get; private set; }
++
++    public VehicleId VehicleId { get; private set; }
++
++    /// <summary>A same-day express run, planned in addition to the zone's standard route.</summary>
++    public bool Express { get; private set; }
++
++    public RouteStatus Status { get; private set; }
++
++    public DateTimeOffset? StartedAt { get; private set; }
++
++    public IReadOnlyList<RouteStop> Stops => _stops;
++
++    public int LoadGrams => _stops.Sum(stop => stop.WeightGrams);
++
++    public static Route Plan(RouteId id, string depot, string zone, DateOnly serviceDate, Driver driver, Vehicle vehicle, bool express)
++    {
++        ArgumentNullException.ThrowIfNull(driver);
++        ArgumentNullException.ThrowIfNull(vehicle);
++        ArgumentException.ThrowIfNullOrWhiteSpace(zone);
++        if (driver.Licence < vehicle.RequiredLicence)
++        {
++            throw new DomainException($"Driver {driver.DisplayName} may not drive {vehicle.Registration}.");
++        }
++
++        if (!driver.Active)
++        {
++            throw new DomainException($"Driver {driver.DisplayName} is not active.");
++        }
++
++        return new Route(id, depot, zone, serviceDate, driver.Id, vehicle.Id, express);
++    }
++
++    /// <summary>Adds a consignment as the last stop; the caller has checked the vehicle's capacity.</summary>
++    public void AddStop(Consignment consignment)
++    {
++        ArgumentNullException.ThrowIfNull(consignment);
++        EnsurePlanned();
++        if (_stops.Any(stop => stop.ConsignmentId == consignment.Id))
++        {
++            throw new DomainException($"Consignment {consignment.Id} is already on route {Id}.");
++        }
++
++        _stops.Add(new RouteStop(consignment.Id, consignment.TotalWeightGrams, _stops.Count + 1));
++        consignment.AssignTo(Id);
++    }
++
++    public void Start(IEnumerable<Consignment> consignments, DateTimeOffset at)
++    {
++        ArgumentNullException.ThrowIfNull(consignments);
++        EnsurePlanned();
++        if (_stops.Count == 0)
++        {
++            throw new DomainException($"Route {Id} has no stops.");
++        }
++
++        Status = RouteStatus.Started;
++        StartedAt = at;
++        foreach (var consignment in consignments.Where(consignment => _stops.Any(stop => stop.ConsignmentId == consignment.Id)))
++        {
++            consignment.MarkOutForDelivery(at);
++        }
++    }
++
++    private void EnsurePlanned()
++    {
++        if (Status != RouteStatus.Planned)
++        {
++            throw new DomainException($"Route {Id} has already started.");
++        }
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Routes/RouteId.cs b/src/Quellbrook.Dispatch.Domain/Routes/RouteId.cs
+new file mode 100644
+index 0000000..66521c6
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Routes/RouteId.cs
+@@ -0,0 +1,6 @@
++namespace Quellbrook.Dispatch.Domain.Routes;
++
++public readonly record struct RouteId(Guid Value)
++{
++    public override string ToString() => Value.ToString();
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Routes/RouteStatus.cs b/src/Quellbrook.Dispatch.Domain/Routes/RouteStatus.cs
+new file mode 100644
+index 0000000..111ca1d
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Routes/RouteStatus.cs
+@@ -0,0 +1,7 @@
++namespace Quellbrook.Dispatch.Domain.Routes;
++
++public enum RouteStatus
++{
++    Planned = 0,
++    Started = 1,
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Routes/RouteStop.cs b/src/Quellbrook.Dispatch.Domain/Routes/RouteStop.cs
+new file mode 100644
+index 0000000..e6e0238
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Routes/RouteStop.cs
+@@ -0,0 +1,6 @@
++using Quellbrook.Dispatch.Domain.Consignments;
++
++namespace Quellbrook.Dispatch.Domain.Routes;
++
++/// <summary>One consignment on a route, in delivery order.</summary>
++public sealed record RouteStop(ConsignmentId ConsignmentId, int WeightGrams, int Sequence);
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs
+new file mode 100644
+index 0000000..8bf41b1
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs
+@@ -0,0 +1,77 @@
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Routes;
++using Quellbrook.Dispatch.UnitTests.TestSupport;
++
++namespace Quellbrook.Dispatch.UnitTests.Domain;
++
++public sealed class ConsignmentTests
++{
++    [Fact]
++    public void AReceivedConsignmentWaitsForARouteInTheZoneOfItsPostalCode()
++    {
++        var consignment = DispatchData.Consignment("8200", ServiceLevel.Standard, 1_000, 2_500);
++
++        Assert.Equal(ConsignmentStatus.AwaitingRoute, consignment.Status);
++        Assert.Equal("DK-AAR", consignment.Zone);
++        Assert.Equal(2, consignment.ParcelCount);
++        Assert.Equal(3_500, consignment.TotalWeightGrams);
++    }
++
++    [Fact]
++    public void AConsignmentWithoutParcelsIsRefused() =>
++        Assert.Throws<DomainException>(() => Consignment.Receive(
++            new ConsignmentId(Guid.NewGuid()), Guid.NewGuid(), ServiceLevel.Standard, "DK", "8000", [], DispatchData.Now));
++
++    [Fact]
++    public void TheLifecycleRaisesOutForDeliveryAndDelivered()
++    {
++        var consignment = DispatchData.Consignment();
++        var routeId = new RouteId(Guid.NewGuid());
++
++        consignment.AssignTo(routeId);
++        consignment.MarkOutForDelivery(DispatchData.Now.AddHours(1));
++        consignment.RecordDelivery(DeliveryProof.SafePlace, DispatchData.Now.AddHours(3));
++
++        Assert.Equal(ConsignmentStatus.Delivered, consignment.Status);
++        Assert.Equal(DeliveryProof.SafePlace, consignment.Proof);
++        Assert.Collection(
++            consignment.DomainEvents,
++            first => Assert.Equal(routeId, Assert.IsType<ConsignmentOutForDelivery>(first).RouteId),
++            second => Assert.Equal(DeliveryProof.SafePlace, Assert.IsType<ConsignmentDelivered>(second).Proof));
++    }
++
++    [Fact]
++    public void AConsignmentCannotBeDeliveredBeforeItIsOutForDelivery()
++    {
++        var consignment = DispatchData.Consignment();
++
++        Assert.Throws<DomainException>(() => consignment.RecordDelivery(DeliveryProof.Signature, DispatchData.Now));
++    }
++
++    [Fact]
++    public void AnAssignedConsignmentCannotBeAssignedAgain()
++    {
++        var consignment = DispatchData.Consignment();
++        consignment.AssignTo(new RouteId(Guid.NewGuid()));
++
++        Assert.Throws<DomainException>(() => consignment.AssignTo(new RouteId(Guid.NewGuid())));
++    }
++
++    [Theory]
++    [InlineData("DK", "1050", "DK-CPH-C")]
++    [InlineData("DK", "2300", "DK-CPH-S")]
++    [InlineData("DK", "9000", "DK-JUT-N")]
++    [InlineData("DK", "3700", "DK-OTHER")]
++    [InlineData("SE", "21145", "SE-MAL")]
++    [InlineData("NO", "0150", "NO-OSL")]
++    [InlineData("DE", "20095", "DE-HAM")]
++    [InlineData("NL", "1012", "NL-AMS")]
++    [InlineData("NL", "3011", "NL-OTHER")]
++    public void PostalCodesMapToTheirDeliveryZone(string country, string postalCode, string zone) =>
++        Assert.Equal(zone, DeliveryZones.ZoneFor(country, postalCode));
++
++    [Fact]
++    public void ACountryWithoutZonesIsRefused() =>
++        Assert.Throws<ArgumentOutOfRangeException>(() => DeliveryZones.ZoneFor("FR", "75001"));
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Domain/RouteAndFleetTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Domain/RouteAndFleetTests.cs
+new file mode 100644
+index 0000000..c6aa5aa
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Domain/RouteAndFleetTests.cs
+@@ -0,0 +1,75 @@
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Domain.Routes;
++using Quellbrook.Dispatch.UnitTests.TestSupport;
++
++namespace Quellbrook.Dispatch.UnitTests.Domain;
++
++public sealed class RouteAndFleetTests
++{
++    [Fact]
++    public void StopsAreNumberedInTheOrderTheyAreAddedAndAssignTheConsignment()
++    {
++        var route = DispatchData.Candidate().Route;
++        var first = DispatchData.Consignment();
++        var second = DispatchData.Consignment(weights: 5_000);
++
++        route.AddStop(first);
++        route.AddStop(second);
++
++        Assert.Equal([1, 2], route.Stops.Select(stop => stop.Sequence));
++        Assert.Equal(7_400, route.LoadGrams);
++        Assert.Equal(route.Id, second.RouteId);
++        Assert.Equal(ConsignmentStatus.Assigned, first.Status);
++    }
++
++    [Fact]
++    public void StartingARouteSendsItsConsignmentsOutForDelivery()
++    {
++        var route = DispatchData.Candidate().Route;
++        var consignment = DispatchData.Consignment();
++        route.AddStop(consignment);
++
++        route.Start([consignment], DispatchData.Now);
++
++        Assert.Equal(RouteStatus.Started, route.Status);
++        Assert.Equal(ConsignmentStatus.OutForDelivery, consignment.Status);
++        Assert.Throws<DomainException>(() => route.AddStop(DispatchData.Consignment()));
++    }
++
++    [Fact]
++    public void AnEmptyRouteCannotStart() =>
++        Assert.Throws<DomainException>(() => DispatchData.Candidate().Route.Start([], DispatchData.Now));
++
++    [Fact]
++    public void ARigidVehicleNeedsACategoryC1Driver()
++    {
++        var rigid = DispatchData.Rigid();
++
++        Assert.Throws<DomainException>(() => Route.Plan(new RouteId(Guid.NewGuid()), "AAR", "DK-AAR", DispatchData.Today,
++            DispatchData.Driver(LicenceCategory.B), rigid, express: false));
++        Assert.Equal(LicenceCategory.C1, rigid.RequiredLicence);
++    }
++
++    [Fact]
++    public void AnInactiveDriverCannotBePlanned()
++    {
++        var driver = DispatchData.Driver();
++        driver.Deactivate();
++
++        Assert.Throws<DomainException>(() => Route.Plan(new RouteId(Guid.NewGuid()), "AAR", "DK-AAR", DispatchData.Today,
++            driver, DispatchData.Van(), express: false));
++    }
++
++    [Fact]
++    public void AShiftEndsAfterItStarts() =>
++        Assert.Throws<DomainException>(() => DispatchData.Driver(shiftStart: 15, shiftEnd: 7));
++
++    [Fact]
++    public void AVehicleCarriesAtMostSevenAndAHalfTonnes() =>
++        Assert.Throws<DomainException>(() => DispatchData.Van(capacityGrams: 8_000_000));
++
++    [Fact]
++    public void ShiftLengthIsMeasuredInHours() => Assert.Equal(8, DispatchData.Driver(shiftStart: 7, shiftEnd: 15).ShiftHours);
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/TestSupport/DispatchData.cs b/tests/Quellbrook.Dispatch.UnitTests/TestSupport/DispatchData.cs
+new file mode 100644
+index 0000000..3afd9a2
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/TestSupport/DispatchData.cs
+@@ -0,0 +1,47 @@
++using Quellbrook.Dispatch.Domain.Assignment;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.UnitTests.TestSupport;
++
++internal static class DispatchData
++{
++    public static readonly DateTimeOffset Now = new(2026, 8, 3, 6, 30, 0, TimeSpan.FromHours(2));
++    public static readonly DateOnly Today = new(2026, 8, 3);
++
++    public static Consignment Consignment(
++        string postalCode = "8000",
++        ServiceLevel serviceLevel = ServiceLevel.Standard,
++        params int[] weights) =>
++        global::Quellbrook.Dispatch.Domain.Consignments.Consignment.Receive(
++            new ConsignmentId(Guid.NewGuid()),
++            Guid.NewGuid(),
++            serviceLevel,
++            "DK",
++            postalCode,
++            weights.Length == 0 ? [2_400] : weights,
++            Now);
++
++    public static Driver Driver(LicenceCategory licence = LicenceCategory.B, int shiftStart = 7, int shiftEnd = 15) =>
++        global::Quellbrook.Dispatch.Domain.Fleet.Driver.Register(new DriverId(Guid.NewGuid()), "Anna K.", "AAR", licence, new TimeOnly(shiftStart, 0), new TimeOnly(shiftEnd, 0));
++
++    public static Vehicle Van(int capacityGrams = 800_000) =>
++        Vehicle.Register(new VehicleId(Guid.NewGuid()), "QB 12 345", "AAR", VehicleKind.Van, capacityGrams);
++
++    public static Vehicle Rigid(int capacityGrams = 3_000_000) =>
++        Vehicle.Register(new VehicleId(Guid.NewGuid()), "QB 98 765", "AAR", VehicleKind.Rigid, capacityGrams);
++
++    public static RouteCandidate Candidate(
++        string zone = "DK-AAR",
++        Vehicle? vehicle = null,
++        Driver? driver = null,
++        bool express = false,
++        DateOnly? date = null)
++    {
++        var chosenVehicle = vehicle ?? Van();
++        var chosenDriver = driver ?? Driver(chosenVehicle.RequiredLicence);
++        var route = Route.Plan(new RouteId(Guid.NewGuid()), "AAR", zone, date ?? Today, chosenDriver, chosenVehicle, express);
++        return new RouteCandidate(route, chosenVehicle, chosenDriver);
++    }
++}

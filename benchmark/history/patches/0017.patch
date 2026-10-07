@@ -1,0 +1,34 @@
+From 357e7ffd917281ce447d5c50edb812da0f29eb35 Mon Sep 17 00:00:00 2001
+From: Dario Fenwick <dario.fenwick@example.invalid>
+Date: Mon, 17 Aug 2026 10:14:45 +0200
+Subject: fix(express): respect the driver's break after 4.5 hours
+
+---
+ .../Assignment/ExpressAssignmentPolicy.cs                  | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs b/src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs
+index 80b8542..69c83c7 100644
+--- a/src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs
++++ b/src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs
+@@ -11,6 +11,7 @@ public sealed class ExpressAssignmentPolicy(
+ {
+     public static readonly TimeOnly CutOff = new(14, 0);
+     public const double CapacityBuffer = 0.1;
++    public const double HoursBeforeBreak = 4.5;
+ 
+     public AssignmentDecision Choose(Consignment consignment, IReadOnlyList<RouteCandidate> candidates, DateTimeOffset now)
+     {
+@@ -67,6 +68,12 @@ public sealed class ExpressAssignmentPolicy(
+                 continue;
+             }
+ 
++            var hoursWorked = (time - driver.ShiftStart).TotalHours;
++            if (hoursWorked >= HoursBeforeBreak && route.StartedAt is null && !route.Express)
++            {
++                continue;
++            }
++
+             if (remaining - consignment.TotalWeightGrams < candidate.Vehicle.CapacityGrams * CapacityBuffer && !route.Express)
+             {
+                 continue;

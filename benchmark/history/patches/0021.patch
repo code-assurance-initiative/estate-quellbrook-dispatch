@@ -1,0 +1,90 @@
+From a4b41875bcee0232ee764c2cd3bff39711740bb8 Mon Sep 17 00:00:00 2001
+From: Kasper Nyholt <kasper.nyholt@example.invalid>
+Date: Fri, 21 Aug 2026 11:20:33 +0200
+Subject: docs: express, cancellations and the drivers endpoint
+
+---
+ README.md              |  5 ++++-
+ contracts/openapi.yaml | 11 ++++++++++-
+ docs/architecture.md   |  3 ++-
+ 3 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/README.md b/README.md
+index eb8ecc7..cbc5b12 100644
+--- a/README.md
++++ b/README.md
+@@ -3,7 +3,8 @@
+ The dispatch service of Quellbrook Freight's operations platform. When the order service announces an order
+ (`orders.order-placed.v1`), dispatch turns it into a **consignment** waiting in the delivery zone of its postal code.
+ Dispatchers plan **routes** — one driver and one vehicle in one zone on one day — and assign consignments to them;
+-when a driver leaves the depot the route starts and its consignments are out for delivery, and the driver records
++express consignments received before the 14:00 cut-off go on a route of the same day (ADR 0004). When a
++driver leaves the depot the route starts and its consignments are out for delivery, and the driver records
+ each delivery. Dispatch announces both moments (`dispatch.consignment-out-for-delivery.v1`,
+ `dispatch.consignment-delivered.v1`), which the notifier turns into messages for the consignee.
+ 
+@@ -20,6 +21,7 @@ each delivery. Dispatch announces both moments (`dispatch.consignment-out-for-de
+ | `POST /consignments/{id}/assignment` | `dispatch:write` | Assign a waiting consignment to the best route |
+ | `POST /consignments/{id}/delivery` | `dispatch:write` | Record a delivery and its proof |
+ | `GET /consignments/by-order/{orderId}` | `dispatch:read` | A consignment's status, for the gateway's shipment view |
++| `GET /drivers/available?date=&depot=` | `dispatch:read` | Drivers and vehicles of a depot without a route on a day |
+ | `GET /health/live`, `GET /health/ready` | none | Liveness and readiness probes |
+ 
+ The contract is `contracts/openapi.yaml`. Only the gateway holds a token with these scopes.
+@@ -29,6 +31,7 @@ The contract is `contracts/openapi.yaml`. Only the gateway holds a token with th
+ | Direction | Routing key | Handled by |
+ |---|---|---|
+ | consumed | `orders.order-placed.v1` | creates the consignment (idempotent: inbox + one consignment per order) |
++| consumed | `orders.order-cancelled.v1` | drops the consignment and its stop, unless it has left the depot |
+ | published | `dispatch.consignment-out-for-delivery.v1` | when a route starts, per consignment |
+ | published | `dispatch.consignment-delivered.v1` | when a delivery is recorded |
+ 
+diff --git a/contracts/openapi.yaml b/contracts/openapi.yaml
+index bce73e4..11d59e4 100644
+--- a/contracts/openapi.yaml
++++ b/contracts/openapi.yaml
+@@ -1,7 +1,7 @@
+ openapi: 3.1.0
+ info:
+   title: Quellbrook Dispatch API
+-  version: 0.1.0
++  version: 0.2.0
+   description: Dispatch service of the Quellbrook operations platform. Called by the API gateway only.
+ servers:
+   - url: http://quellbrook-dispatch.quellbrook-dispatch.svc.cluster.local
+@@ -145,6 +145,15 @@ paths:
+             application/json:
+               schema: { $ref: '#/components/schemas/Consignment' }
+         '404': { description: No consignment for this order (yet). }
++  /drivers/available:
++    get:
++      summary: Drivers and vehicles of a depot without a route on a day
++      security: [{ bearer: [dispatch:read] }]
++      parameters:
++        - { name: date, in: query, required: true, schema: { type: string, format: date } }
++        - { name: depot, in: query, required: true, schema: { type: string } }
++      responses:
++        '200': { description: The available drivers and vehicles. }
+ components:
+   securitySchemes:
+     bearer: { type: http, scheme: bearer, bearerFormat: JWT }
+diff --git a/docs/architecture.md b/docs/architecture.md
+index d0aa580..9b83b00 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -41,7 +41,7 @@ C4Container
+   System_Ext(idp, "Identity provider", "OpenID Connect")
+   Rel(gateway, api, "Calls", "HTTP/JSON over mesh mTLS, bearer token with dispatch:* / fleet:admin")
+   Rel(api, db, "Reads and writes", "EF Core / Npgsql")
+-  Rel(broker, api, "Delivers orders.order-placed.v1", "AMQPS")
++  Rel(broker, api, "Delivers orders.order-placed.v1, orders.order-cancelled.v1", "AMQPS")
+   Rel(api, broker, "Publishes dispatch.*.v1 from the outbox", "AMQPS")
+   Rel(api, idp, "Fetches token signing keys", "HTTPS")
+ ```
+@@ -80,5 +80,6 @@ sequenceDiagram
+ | Routing key | Payload | Direction |
+ |---|---|---|
+ | `orders.order-placed.v1` | order id, service level, consignee address (postal code, country), parcel weights — dispatch's own copy of the fields it uses (`OrderPlacedMessage`) | consumed |
++| `orders.order-cancelled.v1` | order id, reason, time | consumed |
+ | `dispatch.consignment-out-for-delivery.v1` | consignment id, order id, route id, time | published |
+ | `dispatch.consignment-delivered.v1` | consignment id, order id, proof (signature, photo, safe place), time | published |

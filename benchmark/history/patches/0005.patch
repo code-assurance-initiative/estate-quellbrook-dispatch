@@ -1,0 +1,1758 @@
+From 10176be892ad752ea8e21f4fbe6abc63e5d28f0f Mon Sep 17 00:00:00 2001
+From: Wendy Achterberg <wendy.achterberg@example.invalid>
+Date: Wed, 29 Jul 2026 14:30:00 +0200
+Subject: feat: persistence, inbox and outbox over PostgreSQL
+
+---
+ .../ConsignmentDeliveredV1.cs                 |  10 +
+ .../ConsignmentOutForDeliveryV1.cs            |  14 +
+ .../Inbox/InboxMessage.cs                     |  11 +
+ .../Inbox/InboxMessageConfiguration.cs        |  15 +
+ .../Inbox/InboxProcessor.cs                   |  65 ++++
+ .../Outbox/IOutboxPublisher.cs                |   7 +
+ .../Outbox/OutboxMessage.cs                   |  17 ++
+ .../Outbox/OutboxMessageConfiguration.cs      |  16 +
+ .../Outbox/OutboxOptions.cs                   |  23 ++
+ .../Outbox/OutboxRelay.cs                     | 107 +++++++
+ .../Persistence/Configurations.cs             |  83 ++++++
+ .../Persistence/DesignTimeDbContextFactory.cs |  21 ++
+ .../Persistence/DispatchDbContext.cs          |  60 ++++
+ .../Persistence/DispatchEventMapper.cs        |  40 +++
+ .../Persistence/DispatchQueries.cs            |  65 ++++
+ .../20260729143000_InitialCreate.Designer.cs  | 281 ++++++++++++++++++
+ .../20260729143000_InitialCreate.cs           | 196 ++++++++++++
+ .../DispatchDbContextModelSnapshot.cs         | 278 +++++++++++++++++
+ .../Persistence/Repositories.cs               |  57 ++++
+ .../DesignTimeDbContextFactoryTests.cs        |  15 +
+ .../Infrastructure/OutboxRelayTests.cs        | 118 ++++++++
+ .../TestSupport/RecordingOutboxPublisher.cs   |  23 ++
+ .../TestSupport/SqliteDispatchDb.cs           |  44 +++
+ 23 files changed, 1566 insertions(+)
+ create mode 100644 src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentDeliveredV1.cs
+ create mode 100644 src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentOutForDeliveryV1.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxMessage.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxMessageConfiguration.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxProcessor.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Outbox/IOutboxPublisher.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxMessage.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxMessageConfiguration.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxOptions.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxRelay.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Persistence/Configurations.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Persistence/DesignTimeDbContextFactory.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchDbContext.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchEventMapper.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchQueries.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/20260729143000_InitialCreate.Designer.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/20260729143000_InitialCreate.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/DispatchDbContextModelSnapshot.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/Persistence/Repositories.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Infrastructure/DesignTimeDbContextFactoryTests.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Infrastructure/OutboxRelayTests.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/TestSupport/RecordingOutboxPublisher.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/TestSupport/SqliteDispatchDb.cs
+
+diff --git a/src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentDeliveredV1.cs b/src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentDeliveredV1.cs
+new file mode 100644
+index 0000000..fe6fb40
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentDeliveredV1.cs
+@@ -0,0 +1,10 @@
++namespace Quellbrook.Dispatch.Contracts.IntegrationEvents;
++
++/// <summary>
++/// Published when a driver records a delivery (routing key <c>dispatch.consignment-delivered.v1</c>). Schema:
++/// contracts/events/consignment-delivered.v1.schema.json.
++/// </summary>
++public sealed record ConsignmentDeliveredV1(Guid ConsignmentId, Guid OrderId, string Proof, DateTimeOffset DeliveredAt)
++{
++    public const string EventType = "dispatch.consignment-delivered.v1";
++}
+diff --git a/src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentOutForDeliveryV1.cs b/src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentOutForDeliveryV1.cs
+new file mode 100644
+index 0000000..c05c3a5
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentOutForDeliveryV1.cs
+@@ -0,0 +1,14 @@
++namespace Quellbrook.Dispatch.Contracts.IntegrationEvents;
++
++/// <summary>
++/// Published when the route carrying a consignment starts (routing key
++/// <c>dispatch.consignment-out-for-delivery.v1</c>). Schema: contracts/events/consignment-out-for-delivery.v1.schema.json.
++/// </summary>
++public sealed record ConsignmentOutForDeliveryV1(
++    Guid ConsignmentId,
++    Guid OrderId,
++    Guid RouteId,
++    DateTimeOffset OutForDeliveryAt)
++{
++    public const string EventType = "dispatch.consignment-out-for-delivery.v1";
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxMessage.cs b/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxMessage.cs
+new file mode 100644
+index 0000000..35b30f5
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxMessage.cs
+@@ -0,0 +1,11 @@
++namespace Quellbrook.Dispatch.Infrastructure.Inbox;
++
++/// <summary>A message already processed, by its AMQP message id (ADR 0003).</summary>
++public sealed class InboxMessage
++{
++    public Guid MessageId { get; set; }
++
++    public string Type { get; set; } = string.Empty;
++
++    public DateTimeOffset ProcessedAt { get; set; }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxMessageConfiguration.cs b/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxMessageConfiguration.cs
+new file mode 100644
+index 0000000..92abfa4
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxMessageConfiguration.cs
+@@ -0,0 +1,15 @@
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Metadata.Builders;
++
++namespace Quellbrook.Dispatch.Infrastructure.Inbox;
++
++internal sealed class InboxMessageConfiguration : IEntityTypeConfiguration<InboxMessage>
++{
++    public void Configure(EntityTypeBuilder<InboxMessage> builder)
++    {
++        builder.ToTable("inbox_messages");
++        builder.HasKey(message => message.MessageId);
++        builder.Property(message => message.Type).HasMaxLength(100).IsRequired();
++        builder.HasIndex(message => message.ProcessedAt);
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxProcessor.cs b/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxProcessor.cs
+new file mode 100644
+index 0000000..850c8fe
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Inbox/InboxProcessor.cs
+@@ -0,0 +1,65 @@
++using System.Text.Json;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Logging;
++using Quellbrook.Dispatch.Application.Intake;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++
++namespace Quellbrook.Dispatch.Infrastructure.Inbox;
++
++public enum InboxOutcome
++{
++    Processed,
++    Duplicate,
++    Ignored,
++}
++
++/// <summary>
++/// Runs the handler for one received message exactly once per message id: the inbox row and the handler's changes
++/// are committed in one transaction, and a message id already in the inbox is skipped (ADR 0003).
++/// </summary>
++public sealed partial class InboxProcessor(IServiceScopeFactory scopes, TimeProvider time, ILogger<InboxProcessor> logger)
++{
++    private static readonly JsonSerializerOptions s_json = new(JsonSerializerDefaults.Web);
++
++    public async Task<InboxOutcome> ProcessAsync(Guid messageId, string eventType, ReadOnlyMemory<byte> body, CancellationToken cancellationToken)
++    {
++        using var scope = scopes.CreateScope();
++        var services = scope.ServiceProvider;
++        var db = services.GetRequiredService<DispatchDbContext>();
++        if (await db.InboxMessages.AnyAsync(message => message.MessageId == messageId, cancellationToken).ConfigureAwait(false))
++        {
++            LogDuplicate(messageId, eventType);
++            return InboxOutcome.Duplicate;
++        }
++
++        var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
++        await using (transaction.ConfigureAwait(false))
++        {
++            db.InboxMessages.Add(new InboxMessage { MessageId = messageId, Type = eventType, ProcessedAt = time.GetUtcNow() });
++            var handled = await DispatchAsync(services, eventType, body, cancellationToken).ConfigureAwait(false);
++            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
++            return handled ? InboxOutcome.Processed : InboxOutcome.Ignored;
++        }
++    }
++
++    private static async Task<bool> DispatchAsync(IServiceProvider services, string eventType, ReadOnlyMemory<byte> body, CancellationToken cancellationToken)
++    {
++        switch (eventType)
++        {
++            case OrderPlacedMessage.EventType:
++                await services.GetRequiredService<OrderPlacedHandler>()
++                    .HandleAsync(Deserialize<OrderPlacedMessage>(body), cancellationToken).ConfigureAwait(false);
++                return true;
++            default:
++                return false;
++        }
++    }
++
++    private static T Deserialize<T>(ReadOnlyMemory<byte> body) =>
++        JsonSerializer.Deserialize<T>(body.Span, s_json) ?? throw new JsonException($"Empty {typeof(T).Name} message.");
++
++    [LoggerMessage(Level = LogLevel.Information, Message = "Message {MessageId} ({EventType}) was already processed; skipped")]
++    private partial void LogDuplicate(Guid messageId, string eventType);
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Outbox/IOutboxPublisher.cs b/src/Quellbrook.Dispatch.Infrastructure/Outbox/IOutboxPublisher.cs
+new file mode 100644
+index 0000000..65fef53
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Outbox/IOutboxPublisher.cs
+@@ -0,0 +1,7 @@
++namespace Quellbrook.Dispatch.Infrastructure.Outbox;
++
++/// <summary>Sends one stored message to the broker; returns once the broker has confirmed it.</summary>
++public interface IOutboxPublisher
++{
++    Task PublishAsync(Guid messageId, string eventType, ReadOnlyMemory<byte> body, CancellationToken cancellationToken);
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxMessage.cs b/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxMessage.cs
+new file mode 100644
+index 0000000..dbaba0c
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxMessage.cs
+@@ -0,0 +1,17 @@
++namespace Quellbrook.Dispatch.Infrastructure.Outbox;
++
++/// <summary>An integration event stored with the change that raised it, waiting to be published (ADR 0003).</summary>
++public sealed class OutboxMessage
++{
++    public Guid Id { get; set; }
++
++    public string Type { get; set; } = string.Empty;
++
++    public string Payload { get; set; } = string.Empty;
++
++    public DateTimeOffset OccurredAt { get; set; }
++
++    public DateTimeOffset? DispatchedAt { get; set; }
++
++    public int Attempts { get; set; }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxMessageConfiguration.cs b/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxMessageConfiguration.cs
+new file mode 100644
+index 0000000..a7c856a
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxMessageConfiguration.cs
+@@ -0,0 +1,16 @@
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Metadata.Builders;
++
++namespace Quellbrook.Dispatch.Infrastructure.Outbox;
++
++internal sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<OutboxMessage>
++{
++    public void Configure(EntityTypeBuilder<OutboxMessage> builder)
++    {
++        builder.ToTable("outbox_messages");
++        builder.HasKey(message => message.Id);
++        builder.Property(message => message.Type).HasMaxLength(100).IsRequired();
++        builder.Property(message => message.Payload).HasColumnType("jsonb").IsRequired();
++        builder.HasIndex(message => new { message.DispatchedAt, message.OccurredAt });
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxOptions.cs b/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxOptions.cs
+new file mode 100644
+index 0000000..fba2500
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxOptions.cs
+@@ -0,0 +1,23 @@
++using System.ComponentModel.DataAnnotations;
++
++namespace Quellbrook.Dispatch.Infrastructure.Outbox;
++
++public sealed class OutboxOptions
++{
++    public const string SectionName = "Outbox";
++
++    /// <summary>How often the relay looks for undispatched messages.</summary>
++    [Range(typeof(TimeSpan), "00:00:00.100", "00:01:00")]
++    public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(2);
++
++    [Range(1, 500)]
++    public int BatchSize { get; set; } = 50;
++
++    /// <summary>How long a dispatched message is kept for replay and investigation before it is deleted.</summary>
++    [Range(typeof(TimeSpan), "1.00:00:00", "30.00:00:00")]
++    public TimeSpan Retention { get; set; } = TimeSpan.FromDays(7);
++
++    /// <summary>How often expired messages are deleted.</summary>
++    [Range(typeof(TimeSpan), "00:01:00", "1.00:00:00")]
++    public TimeSpan PurgeInterval { get; set; } = TimeSpan.FromHours(1);
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxRelay.cs b/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxRelay.cs
+new file mode 100644
+index 0000000..23711e0
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Outbox/OutboxRelay.cs
+@@ -0,0 +1,107 @@
++using System.Text;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Hosting;
++using Microsoft.Extensions.Logging;
++using Microsoft.Extensions.Options;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++
++namespace Quellbrook.Dispatch.Infrastructure.Outbox;
++
++/// <summary>
++/// Publishes stored messages in the order they occurred and marks each one dispatched (ADR 0003). A failure stops the
++/// batch so that order is kept; the message is retried on the next poll. Dispatched messages are deleted after the
++/// retention period.
++/// </summary>
++public sealed partial class OutboxRelay(
++    IServiceScopeFactory scopes,
++    IOutboxPublisher publisher,
++    TimeProvider time,
++    IOptions<OutboxOptions> options,
++    ILogger<OutboxRelay> logger) : BackgroundService
++{
++    public async Task<int> DispatchPendingAsync(CancellationToken cancellationToken)
++    {
++        using var scope = scopes.CreateScope();
++        var db = scope.ServiceProvider.GetRequiredService<DispatchDbContext>();
++        var pending = await db.OutboxMessages
++            .Where(message => message.DispatchedAt == null)
++            .OrderBy(message => message.OccurredAt)
++            .ThenBy(message => message.Id)
++            .Take(options.Value.BatchSize)
++            .ToListAsync(cancellationToken)
++            .ConfigureAwait(false);
++
++        var dispatched = 0;
++        foreach (var message in pending)
++        {
++            try
++            {
++                await publisher.PublishAsync(message.Id, message.Type, Encoding.UTF8.GetBytes(message.Payload), cancellationToken)
++                    .ConfigureAwait(false);
++            }
++            catch (Exception exception) when (exception is not OperationCanceledException)
++            {
++                message.Attempts++;
++                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++                LogPublishFailed(exception, message.Id, message.Type, message.Attempts);
++                break;
++            }
++
++            message.DispatchedAt = time.GetUtcNow();
++            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++            dispatched++;
++        }
++
++        return dispatched;
++    }
++
++    /// <summary>Deletes dispatched messages older than the retention period; returns how many.</summary>
++    public async Task<int> PurgeExpiredAsync(CancellationToken cancellationToken)
++    {
++        using var scope = scopes.CreateScope();
++        var db = scope.ServiceProvider.GetRequiredService<DispatchDbContext>();
++        var cutoff = time.GetUtcNow() - options.Value.Retention;
++        var purged = await db.OutboxMessages
++            .Where(message => message.DispatchedAt != null && message.DispatchedAt < cutoff)
++            .ExecuteDeleteAsync(cancellationToken)
++            .ConfigureAwait(false);
++        if (purged > 0)
++        {
++            LogPurged(purged, cutoff);
++        }
++
++        return purged;
++    }
++
++    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
++    {
++        using var timer = new PeriodicTimer(options.Value.PollInterval, time);
++        var nextPurge = time.GetUtcNow();
++        while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
++        {
++            try
++            {
++                await DispatchPendingAsync(stoppingToken).ConfigureAwait(false);
++                if (time.GetUtcNow() >= nextPurge)
++                {
++                    await PurgeExpiredAsync(stoppingToken).ConfigureAwait(false);
++                    nextPurge = time.GetUtcNow() + options.Value.PurgeInterval;
++                }
++            }
++            catch (DbUpdateException exception)
++            {
++                LogStoreFailed(exception);
++            }
++        }
++    }
++
++    [LoggerMessage(Level = LogLevel.Warning, Message = "Publishing outbox message {MessageId} ({EventType}) failed, attempt {Attempts}; retrying on the next poll")]
++    private partial void LogPublishFailed(Exception exception, Guid messageId, string eventType, int attempts);
++
++    [LoggerMessage(Level = LogLevel.Information, Message = "Deleted {Count} outbox messages dispatched before {Cutoff}")]
++    private partial void LogPurged(int count, DateTimeOffset cutoff);
++
++    [LoggerMessage(Level = LogLevel.Error, Message = "The outbox could not be updated; retrying on the next poll")]
++    private partial void LogStoreFailed(Exception exception);
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Persistence/Configurations.cs b/src/Quellbrook.Dispatch.Infrastructure/Persistence/Configurations.cs
+new file mode 100644
+index 0000000..6b80f43
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Persistence/Configurations.cs
+@@ -0,0 +1,83 @@
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Metadata.Builders;
++using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Infrastructure.Persistence;
++
++internal sealed class ConsignmentConfiguration : IEntityTypeConfiguration<Consignment>
++{
++    public void Configure(EntityTypeBuilder<Consignment> builder)
++    {
++        builder.ToTable("consignments");
++        builder.HasKey(consignment => consignment.Id);
++        builder.Property(consignment => consignment.Id).HasConversion(id => id.Value, value => new ConsignmentId(value));
++        builder.Property(consignment => consignment.RouteId).HasConversion(new ValueConverter<RouteId, Guid>(id => id.Value, value => new RouteId(value)));
++        builder.Property(consignment => consignment.ServiceLevel).HasConversion<string>().HasMaxLength(16);
++        builder.Property(consignment => consignment.Status).HasConversion<string>().HasMaxLength(16);
++        builder.Property(consignment => consignment.Proof).HasConversion<string>().HasMaxLength(16);
++        builder.Property(consignment => consignment.CountryCode).HasMaxLength(2);
++        builder.Property(consignment => consignment.PostalCode).HasMaxLength(10);
++        builder.Property(consignment => consignment.Zone).HasMaxLength(16);
++        builder.HasIndex(consignment => consignment.OrderId).IsUnique();
++        builder.HasIndex(consignment => consignment.RouteId);
++        builder.Ignore(consignment => consignment.DomainEvents);
++    }
++}
++
++internal sealed class RouteConfiguration : IEntityTypeConfiguration<Route>
++{
++    public void Configure(EntityTypeBuilder<Route> builder)
++    {
++        builder.ToTable("routes");
++        builder.HasKey(route => route.Id);
++        builder.Property(route => route.Id).HasConversion(id => id.Value, value => new RouteId(value));
++        builder.Property(route => route.DriverId).HasConversion(id => id.Value, value => new DriverId(value));
++        builder.Property(route => route.VehicleId).HasConversion(id => id.Value, value => new VehicleId(value));
++        builder.Property(route => route.Status).HasConversion<string>().HasMaxLength(16);
++        builder.Property(route => route.Depot).HasMaxLength(16);
++        builder.Property(route => route.Zone).HasMaxLength(16);
++        builder.HasIndex(route => new { route.ServiceDate, route.Zone });
++        builder.OwnsMany(route => route.Stops, stops =>
++        {
++            stops.ToTable("route_stops");
++            stops.WithOwner().HasForeignKey("RouteId");
++            stops.Property(stop => stop.ConsignmentId).HasConversion(id => id.Value, value => new ConsignmentId(value));
++            stops.HasKey("RouteId", nameof(RouteStop.ConsignmentId));
++        });
++        builder.Navigation(route => route.Stops).UsePropertyAccessMode(PropertyAccessMode.Field);
++        builder.Ignore(route => route.DomainEvents);
++        builder.Ignore(route => route.LoadGrams);
++    }
++}
++
++internal sealed class DriverConfiguration : IEntityTypeConfiguration<Driver>
++{
++    public void Configure(EntityTypeBuilder<Driver> builder)
++    {
++        builder.ToTable("drivers");
++        builder.HasKey(driver => driver.Id);
++        builder.Property(driver => driver.Id).HasConversion(id => id.Value, value => new DriverId(value));
++        builder.Property(driver => driver.DisplayName).HasMaxLength(40);
++        builder.Property(driver => driver.Depot).HasMaxLength(16);
++        builder.Property(driver => driver.Licence).HasConversion<string>().HasMaxLength(4);
++        builder.Ignore(driver => driver.ShiftHours);
++    }
++}
++
++internal sealed class VehicleConfiguration : IEntityTypeConfiguration<Vehicle>
++{
++    public void Configure(EntityTypeBuilder<Vehicle> builder)
++    {
++        builder.ToTable("vehicles");
++        builder.HasKey(vehicle => vehicle.Id);
++        builder.Property(vehicle => vehicle.Id).HasConversion(id => id.Value, value => new VehicleId(value));
++        builder.Property(vehicle => vehicle.Registration).HasMaxLength(16);
++        builder.Property(vehicle => vehicle.Depot).HasMaxLength(16);
++        builder.Property(vehicle => vehicle.Kind).HasConversion<string>().HasMaxLength(8);
++        builder.HasIndex(vehicle => vehicle.Registration).IsUnique();
++        builder.Ignore(vehicle => vehicle.RequiredLicence);
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Persistence/DesignTimeDbContextFactory.cs b/src/Quellbrook.Dispatch.Infrastructure/Persistence/DesignTimeDbContextFactory.cs
+new file mode 100644
+index 0000000..582bedd
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Persistence/DesignTimeDbContextFactory.cs
+@@ -0,0 +1,21 @@
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Design;
++
++namespace Quellbrook.Dispatch.Infrastructure.Persistence;
++
++/// <summary>
++/// Used by <c>dotnet ef</c> and by the migrations bundle. The connection string comes from the environment, never from
++/// the command line, so it does not show up in process listings or CI logs.
++/// </summary>
++public sealed class DesignTimeDbContextFactory : IDesignTimeDbContextFactory<DispatchDbContext>
++{
++    public DispatchDbContext CreateDbContext(string[] args)
++    {
++        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Dispatch")
++            ?? "Host=localhost;Database=dispatch;Username=dispatch";
++        var options = new DbContextOptionsBuilder<DispatchDbContext>()
++            .UseNpgsql(connectionString)
++            .Options;
++        return new DispatchDbContext(options);
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchDbContext.cs b/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchDbContext.cs
+new file mode 100644
+index 0000000..d02182a
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchDbContext.cs
+@@ -0,0 +1,60 @@
++using System.Text.Json;
++using Microsoft.EntityFrameworkCore;
++using Quellbrook.Dispatch.Application.Abstractions;
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Domain.Routes;
++using Quellbrook.Dispatch.Infrastructure.Inbox;
++using Quellbrook.Dispatch.Infrastructure.Outbox;
++
++namespace Quellbrook.Dispatch.Infrastructure.Persistence;
++
++/// <summary>
++/// The dispatch database. Saving also writes one outbox message per domain event raised by the tracked aggregates,
++/// in the same transaction (ADR 0003).
++/// </summary>
++public sealed class DispatchDbContext(DbContextOptions<DispatchDbContext> options) : DbContext(options), IUnitOfWork
++{
++    private static readonly JsonSerializerOptions s_json = new(JsonSerializerDefaults.Web);
++
++    public DbSet<Consignment> Consignments => Set<Consignment>();
++
++    public DbSet<Route> Routes => Set<Route>();
++
++    public DbSet<Driver> Drivers => Set<Driver>();
++
++    public DbSet<Vehicle> Vehicles => Set<Vehicle>();
++
++    public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
++
++    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
++
++    Task IUnitOfWork.SaveChangesAsync(CancellationToken cancellationToken) => SaveChangesAsync(cancellationToken);
++
++    public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
++    {
++        var aggregates = ChangeTracker.Entries<AggregateRoot>().Select(entry => entry.Entity).Where(entity => entity.DomainEvents.Count > 0).ToList();
++        foreach (var domainEvent in aggregates.SelectMany(aggregate => aggregate.DomainEvents))
++        {
++            var message = DispatchEventMapper.ToIntegrationMessage(domainEvent);
++            OutboxMessages.Add(new OutboxMessage
++            {
++                Id = message.MessageId,
++                Type = message.EventType,
++                Payload = JsonSerializer.Serialize(message.Payload, message.Payload.GetType(), s_json),
++                OccurredAt = domainEvent.OccurredAt,
++            });
++        }
++
++        var written = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken).ConfigureAwait(false);
++        aggregates.ForEach(aggregate => aggregate.ClearDomainEvents());
++        return written;
++    }
++
++    protected override void OnModelCreating(ModelBuilder modelBuilder)
++    {
++        ArgumentNullException.ThrowIfNull(modelBuilder);
++        modelBuilder.ApplyConfigurationsFromAssembly(typeof(DispatchDbContext).Assembly);
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchEventMapper.cs b/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchEventMapper.cs
+new file mode 100644
+index 0000000..f9976fb
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchEventMapper.cs
+@@ -0,0 +1,40 @@
++using Quellbrook.Dispatch.Contracts.IntegrationEvents;
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Consignments;
++
++namespace Quellbrook.Dispatch.Infrastructure.Persistence;
++
++internal sealed record IntegrationMessage(Guid MessageId, string EventType, object Payload);
++
++/// <summary>Maps domain events to the published dispatch contracts.</summary>
++internal static class DispatchEventMapper
++{
++    public static IntegrationMessage ToIntegrationMessage(IDomainEvent domainEvent) => domainEvent switch
++    {
++        ConsignmentOutForDelivery outForDelivery => new IntegrationMessage(
++            Guid.CreateVersion7(outForDelivery.OccurredAt),
++            ConsignmentOutForDeliveryV1.EventType,
++            new ConsignmentOutForDeliveryV1(
++                outForDelivery.ConsignmentId.Value,
++                outForDelivery.OrderId,
++                outForDelivery.RouteId.Value,
++                outForDelivery.OccurredAt)),
++        ConsignmentDelivered delivered => new IntegrationMessage(
++            Guid.CreateVersion7(delivered.OccurredAt),
++            ConsignmentDeliveredV1.EventType,
++            new ConsignmentDeliveredV1(
++                delivered.ConsignmentId.Value,
++                delivered.OrderId,
++                ProofName(delivered.Proof),
++                delivered.OccurredAt)),
++        _ => throw new InvalidOperationException($"No integration event for {domainEvent.GetType().Name}."),
++    };
++
++    public static string ProofName(DeliveryProof proof) => proof switch
++    {
++        DeliveryProof.Signature => "signature",
++        DeliveryProof.Photo => "photo",
++        DeliveryProof.SafePlace => "safe-place",
++        _ => throw new ArgumentOutOfRangeException(nameof(proof), proof, null),
++    };
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchQueries.cs b/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchQueries.cs
+new file mode 100644
+index 0000000..d28e2a2
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchQueries.cs
+@@ -0,0 +1,65 @@
++using Microsoft.EntityFrameworkCore;
++using Quellbrook.Dispatch.Application.Queries;
++
++namespace Quellbrook.Dispatch.Infrastructure.Persistence;
++
++public sealed class DispatchQueries(DispatchDbContext db) : IDispatchQueries
++{
++    public async Task<IReadOnlyList<RouteBoardEntry>> BoardAsync(DateOnly serviceDate, CancellationToken cancellationToken)
++    {
++        var routes = await db.Routes.AsNoTracking()
++            .Where(route => route.ServiceDate == serviceDate)
++            .OrderBy(route => route.Zone)
++            .ThenBy(route => route.Express)
++            .ToListAsync(cancellationToken)
++            .ConfigureAwait(false);
++        var drivers = await db.Drivers.AsNoTracking().ToDictionaryAsync(driver => driver.Id, cancellationToken).ConfigureAwait(false);
++        var vehicles = await db.Vehicles.AsNoTracking().ToDictionaryAsync(vehicle => vehicle.Id, cancellationToken).ConfigureAwait(false);
++        var routeIds = routes.Select(route => route.Id).ToList();
++        var consignments = await db.Consignments.AsNoTracking()
++            .Where(consignment => consignment.RouteId != null && routeIds.Contains(consignment.RouteId.Value))
++            .ToDictionaryAsync(consignment => consignment.Id, cancellationToken)
++            .ConfigureAwait(false);
++
++        return [.. routes.Select(route =>
++        {
++            var vehicle = vehicles[route.VehicleId];
++            return new RouteBoardEntry(
++                route.Id.Value,
++                route.Depot,
++                route.Zone,
++                route.Express,
++                route.Status.ToString(),
++                drivers[route.DriverId].DisplayName,
++                vehicle.Registration,
++                vehicle.Kind.ToString(),
++                vehicle.CapacityGrams,
++                route.LoadGrams,
++                [.. route.Stops.OrderBy(stop => stop.Sequence).Select(stop =>
++                {
++                    var consignment = consignments[stop.ConsignmentId];
++                    return new RouteBoardStop(stop.Sequence, stop.ConsignmentId.Value, consignment.OrderId, consignment.PostalCode,
++                        stop.WeightGrams, consignment.Status.ToString());
++                })]);
++        })];
++    }
++
++    public async Task<ConsignmentView?> ForOrderAsync(Guid orderId, CancellationToken cancellationToken)
++    {
++        var consignment = await db.Consignments.AsNoTracking()
++            .SingleOrDefaultAsync(consignment => consignment.OrderId == orderId, cancellationToken)
++            .ConfigureAwait(false);
++        return consignment is null
++            ? null
++            : new ConsignmentView(
++                consignment.Id.Value,
++                consignment.OrderId,
++                consignment.ServiceLevel.ToString(),
++                consignment.Zone,
++                consignment.Status.ToString(),
++                consignment.RouteId?.Value,
++                consignment.OutForDeliveryAt,
++                consignment.DeliveredAt,
++                consignment.Proof is { } proof ? DispatchEventMapper.ProofName(proof) : null);
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/20260729143000_InitialCreate.Designer.cs b/src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/20260729143000_InitialCreate.Designer.cs
+new file mode 100644
+index 0000000..316ab42
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/20260729143000_InitialCreate.Designer.cs
+@@ -0,0 +1,281 @@
++﻿// <auto-generated />
++using System;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Infrastructure;
++using Microsoft.EntityFrameworkCore.Migrations;
++using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
++using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++
++#nullable disable
++
++namespace Quellbrook.Dispatch.Infrastructure.Persistence.Migrations
++{
++    [DbContext(typeof(DispatchDbContext))]
++    [Migration("20260729143000_InitialCreate")]
++    partial class InitialCreate
++    {
++        /// <inheritdoc />
++        protected override void BuildTargetModel(ModelBuilder modelBuilder)
++        {
++#pragma warning disable 612, 618
++            modelBuilder
++                .HasAnnotation("ProductVersion", "10.0.12")
++                .HasAnnotation("Relational:MaxIdentifierLength", 63);
++
++            NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Domain.Consignments.Consignment", b =>
++                {
++                    b.Property<Guid>("Id")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("CountryCode")
++                        .IsRequired()
++                        .HasMaxLength(2)
++                        .HasColumnType("character varying(2)");
++
++                    b.Property<DateTimeOffset?>("DeliveredAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<Guid>("OrderId")
++                        .HasColumnType("uuid");
++
++                    b.Property<DateTimeOffset?>("OutForDeliveryAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<int>("ParcelCount")
++                        .HasColumnType("integer");
++
++                    b.Property<string>("PostalCode")
++                        .IsRequired()
++                        .HasMaxLength(10)
++                        .HasColumnType("character varying(10)");
++
++                    b.Property<string>("Proof")
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<DateTimeOffset>("ReceivedAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<Guid?>("RouteId")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("ServiceLevel")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<string>("Status")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<int>("TotalWeightGrams")
++                        .HasColumnType("integer");
++
++                    b.Property<string>("Zone")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("OrderId")
++                        .IsUnique();
++
++                    b.HasIndex("RouteId");
++
++                    b.ToTable("consignments", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Domain.Fleet.Driver", b =>
++                {
++                    b.Property<Guid>("Id")
++                        .HasColumnType("uuid");
++
++                    b.Property<bool>("Active")
++                        .HasColumnType("boolean");
++
++                    b.Property<string>("Depot")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<string>("DisplayName")
++                        .IsRequired()
++                        .HasMaxLength(40)
++                        .HasColumnType("character varying(40)");
++
++                    b.Property<string>("Licence")
++                        .IsRequired()
++                        .HasMaxLength(4)
++                        .HasColumnType("character varying(4)");
++
++                    b.Property<TimeOnly>("ShiftEnd")
++                        .HasColumnType("time without time zone");
++
++                    b.Property<TimeOnly>("ShiftStart")
++                        .HasColumnType("time without time zone");
++
++                    b.HasKey("Id");
++
++                    b.ToTable("drivers", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Domain.Fleet.Vehicle", b =>
++                {
++                    b.Property<Guid>("Id")
++                        .HasColumnType("uuid");
++
++                    b.Property<int>("CapacityGrams")
++                        .HasColumnType("integer");
++
++                    b.Property<string>("Depot")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<string>("Kind")
++                        .IsRequired()
++                        .HasMaxLength(8)
++                        .HasColumnType("character varying(8)");
++
++                    b.Property<string>("Registration")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("Registration")
++                        .IsUnique();
++
++                    b.ToTable("vehicles", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Domain.Routes.Route", b =>
++                {
++                    b.Property<Guid>("Id")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("Depot")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<Guid>("DriverId")
++                        .HasColumnType("uuid");
++
++                    b.Property<bool>("Express")
++                        .HasColumnType("boolean");
++
++                    b.Property<DateOnly>("ServiceDate")
++                        .HasColumnType("date");
++
++                    b.Property<DateTimeOffset?>("StartedAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<string>("Status")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<Guid>("VehicleId")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("Zone")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("ServiceDate", "Zone");
++
++                    b.ToTable("routes", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Infrastructure.Inbox.InboxMessage", b =>
++                {
++                    b.Property<Guid>("MessageId")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("uuid");
++
++                    b.Property<DateTimeOffset>("ProcessedAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<string>("Type")
++                        .IsRequired()
++                        .HasMaxLength(100)
++                        .HasColumnType("character varying(100)");
++
++                    b.HasKey("MessageId");
++
++                    b.HasIndex("ProcessedAt");
++
++                    b.ToTable("inbox_messages", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Infrastructure.Outbox.OutboxMessage", b =>
++                {
++                    b.Property<Guid>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("uuid");
++
++                    b.Property<int>("Attempts")
++                        .HasColumnType("integer");
++
++                    b.Property<DateTimeOffset?>("DispatchedAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<DateTimeOffset>("OccurredAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<string>("Payload")
++                        .IsRequired()
++                        .HasColumnType("jsonb");
++
++                    b.Property<string>("Type")
++                        .IsRequired()
++                        .HasMaxLength(100)
++                        .HasColumnType("character varying(100)");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("DispatchedAt", "OccurredAt");
++
++                    b.ToTable("outbox_messages", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Domain.Routes.Route", b =>
++                {
++                    b.OwnsMany("Quellbrook.Dispatch.Domain.Routes.RouteStop", "Stops", b1 =>
++                        {
++                            b1.Property<Guid>("RouteId")
++                                .HasColumnType("uuid");
++
++                            b1.Property<Guid>("ConsignmentId")
++                                .HasColumnType("uuid");
++
++                            b1.Property<int>("Sequence")
++                                .HasColumnType("integer");
++
++                            b1.Property<int>("WeightGrams")
++                                .HasColumnType("integer");
++
++                            b1.HasKey("RouteId", "ConsignmentId");
++
++                            b1.ToTable("route_stops", (string)null);
++
++                            b1.WithOwner()
++                                .HasForeignKey("RouteId");
++                        });
++
++                    b.Navigation("Stops");
++                });
++#pragma warning restore 612, 618
++        }
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/20260729143000_InitialCreate.cs b/src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/20260729143000_InitialCreate.cs
+new file mode 100644
+index 0000000..cf33bfe
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/20260729143000_InitialCreate.cs
+@@ -0,0 +1,196 @@
++﻿using System;
++using Microsoft.EntityFrameworkCore.Migrations;
++
++#nullable disable
++
++namespace Quellbrook.Dispatch.Infrastructure.Persistence.Migrations
++{
++    /// <inheritdoc />
++    public partial class InitialCreate : Migration
++    {
++        /// <inheritdoc />
++        protected override void Up(MigrationBuilder migrationBuilder)
++        {
++            migrationBuilder.CreateTable(
++                name: "consignments",
++                columns: table => new
++                {
++                    Id = table.Column<Guid>(type: "uuid", nullable: false),
++                    OrderId = table.Column<Guid>(type: "uuid", nullable: false),
++                    ServiceLevel = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
++                    CountryCode = table.Column<string>(type: "character varying(2)", maxLength: 2, nullable: false),
++                    PostalCode = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
++                    Zone = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
++                    ParcelCount = table.Column<int>(type: "integer", nullable: false),
++                    TotalWeightGrams = table.Column<int>(type: "integer", nullable: false),
++                    ReceivedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
++                    Status = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
++                    RouteId = table.Column<Guid>(type: "uuid", nullable: true),
++                    OutForDeliveryAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
++                    DeliveredAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
++                    Proof = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: true)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_consignments", x => x.Id);
++                });
++
++            migrationBuilder.CreateTable(
++                name: "drivers",
++                columns: table => new
++                {
++                    Id = table.Column<Guid>(type: "uuid", nullable: false),
++                    DisplayName = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: false),
++                    Depot = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
++                    Licence = table.Column<string>(type: "character varying(4)", maxLength: 4, nullable: false),
++                    ShiftStart = table.Column<TimeOnly>(type: "time without time zone", nullable: false),
++                    ShiftEnd = table.Column<TimeOnly>(type: "time without time zone", nullable: false),
++                    Active = table.Column<bool>(type: "boolean", nullable: false)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_drivers", x => x.Id);
++                });
++
++            migrationBuilder.CreateTable(
++                name: "inbox_messages",
++                columns: table => new
++                {
++                    MessageId = table.Column<Guid>(type: "uuid", nullable: false),
++                    Type = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
++                    ProcessedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_inbox_messages", x => x.MessageId);
++                });
++
++            migrationBuilder.CreateTable(
++                name: "outbox_messages",
++                columns: table => new
++                {
++                    Id = table.Column<Guid>(type: "uuid", nullable: false),
++                    Type = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
++                    Payload = table.Column<string>(type: "jsonb", nullable: false),
++                    OccurredAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
++                    DispatchedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
++                    Attempts = table.Column<int>(type: "integer", nullable: false)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_outbox_messages", x => x.Id);
++                });
++
++            migrationBuilder.CreateTable(
++                name: "routes",
++                columns: table => new
++                {
++                    Id = table.Column<Guid>(type: "uuid", nullable: false),
++                    Depot = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
++                    Zone = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
++                    ServiceDate = table.Column<DateOnly>(type: "date", nullable: false),
++                    DriverId = table.Column<Guid>(type: "uuid", nullable: false),
++                    VehicleId = table.Column<Guid>(type: "uuid", nullable: false),
++                    Express = table.Column<bool>(type: "boolean", nullable: false),
++                    Status = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
++                    StartedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_routes", x => x.Id);
++                });
++
++            migrationBuilder.CreateTable(
++                name: "vehicles",
++                columns: table => new
++                {
++                    Id = table.Column<Guid>(type: "uuid", nullable: false),
++                    Registration = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
++                    Depot = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
++                    Kind = table.Column<string>(type: "character varying(8)", maxLength: 8, nullable: false),
++                    CapacityGrams = table.Column<int>(type: "integer", nullable: false)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_vehicles", x => x.Id);
++                });
++
++            migrationBuilder.CreateTable(
++                name: "route_stops",
++                columns: table => new
++                {
++                    ConsignmentId = table.Column<Guid>(type: "uuid", nullable: false),
++                    RouteId = table.Column<Guid>(type: "uuid", nullable: false),
++                    WeightGrams = table.Column<int>(type: "integer", nullable: false),
++                    Sequence = table.Column<int>(type: "integer", nullable: false)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_route_stops", x => new { x.RouteId, x.ConsignmentId });
++                    table.ForeignKey(
++                        name: "FK_route_stops_routes_RouteId",
++                        column: x => x.RouteId,
++                        principalTable: "routes",
++                        principalColumn: "Id",
++                        onDelete: ReferentialAction.Cascade);
++                });
++
++            migrationBuilder.CreateIndex(
++                name: "IX_consignments_OrderId",
++                table: "consignments",
++                column: "OrderId",
++                unique: true);
++
++            migrationBuilder.CreateIndex(
++                name: "IX_consignments_RouteId",
++                table: "consignments",
++                column: "RouteId");
++
++            migrationBuilder.CreateIndex(
++                name: "IX_inbox_messages_ProcessedAt",
++                table: "inbox_messages",
++                column: "ProcessedAt");
++
++            migrationBuilder.CreateIndex(
++                name: "IX_outbox_messages_DispatchedAt_OccurredAt",
++                table: "outbox_messages",
++                columns: new[] { "DispatchedAt", "OccurredAt" });
++
++            migrationBuilder.CreateIndex(
++                name: "IX_routes_ServiceDate_Zone",
++                table: "routes",
++                columns: new[] { "ServiceDate", "Zone" });
++
++            migrationBuilder.CreateIndex(
++                name: "IX_vehicles_Registration",
++                table: "vehicles",
++                column: "Registration",
++                unique: true);
++        }
++
++        /// <inheritdoc />
++        protected override void Down(MigrationBuilder migrationBuilder)
++        {
++            migrationBuilder.DropTable(
++                name: "consignments");
++
++            migrationBuilder.DropTable(
++                name: "drivers");
++
++            migrationBuilder.DropTable(
++                name: "inbox_messages");
++
++            migrationBuilder.DropTable(
++                name: "outbox_messages");
++
++            migrationBuilder.DropTable(
++                name: "route_stops");
++
++            migrationBuilder.DropTable(
++                name: "vehicles");
++
++            migrationBuilder.DropTable(
++                name: "routes");
++        }
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/DispatchDbContextModelSnapshot.cs b/src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/DispatchDbContextModelSnapshot.cs
+new file mode 100644
+index 0000000..6557d9c
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Persistence/Migrations/DispatchDbContextModelSnapshot.cs
+@@ -0,0 +1,278 @@
++﻿// <auto-generated />
++using System;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Infrastructure;
++using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
++using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++
++#nullable disable
++
++namespace Quellbrook.Dispatch.Infrastructure.Persistence.Migrations
++{
++    [DbContext(typeof(DispatchDbContext))]
++    partial class DispatchDbContextModelSnapshot : ModelSnapshot
++    {
++        protected override void BuildModel(ModelBuilder modelBuilder)
++        {
++#pragma warning disable 612, 618
++            modelBuilder
++                .HasAnnotation("ProductVersion", "10.0.12")
++                .HasAnnotation("Relational:MaxIdentifierLength", 63);
++
++            NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Domain.Consignments.Consignment", b =>
++                {
++                    b.Property<Guid>("Id")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("CountryCode")
++                        .IsRequired()
++                        .HasMaxLength(2)
++                        .HasColumnType("character varying(2)");
++
++                    b.Property<DateTimeOffset?>("DeliveredAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<Guid>("OrderId")
++                        .HasColumnType("uuid");
++
++                    b.Property<DateTimeOffset?>("OutForDeliveryAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<int>("ParcelCount")
++                        .HasColumnType("integer");
++
++                    b.Property<string>("PostalCode")
++                        .IsRequired()
++                        .HasMaxLength(10)
++                        .HasColumnType("character varying(10)");
++
++                    b.Property<string>("Proof")
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<DateTimeOffset>("ReceivedAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<Guid?>("RouteId")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("ServiceLevel")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<string>("Status")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<int>("TotalWeightGrams")
++                        .HasColumnType("integer");
++
++                    b.Property<string>("Zone")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("OrderId")
++                        .IsUnique();
++
++                    b.HasIndex("RouteId");
++
++                    b.ToTable("consignments", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Domain.Fleet.Driver", b =>
++                {
++                    b.Property<Guid>("Id")
++                        .HasColumnType("uuid");
++
++                    b.Property<bool>("Active")
++                        .HasColumnType("boolean");
++
++                    b.Property<string>("Depot")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<string>("DisplayName")
++                        .IsRequired()
++                        .HasMaxLength(40)
++                        .HasColumnType("character varying(40)");
++
++                    b.Property<string>("Licence")
++                        .IsRequired()
++                        .HasMaxLength(4)
++                        .HasColumnType("character varying(4)");
++
++                    b.Property<TimeOnly>("ShiftEnd")
++                        .HasColumnType("time without time zone");
++
++                    b.Property<TimeOnly>("ShiftStart")
++                        .HasColumnType("time without time zone");
++
++                    b.HasKey("Id");
++
++                    b.ToTable("drivers", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Domain.Fleet.Vehicle", b =>
++                {
++                    b.Property<Guid>("Id")
++                        .HasColumnType("uuid");
++
++                    b.Property<int>("CapacityGrams")
++                        .HasColumnType("integer");
++
++                    b.Property<string>("Depot")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<string>("Kind")
++                        .IsRequired()
++                        .HasMaxLength(8)
++                        .HasColumnType("character varying(8)");
++
++                    b.Property<string>("Registration")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("Registration")
++                        .IsUnique();
++
++                    b.ToTable("vehicles", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Domain.Routes.Route", b =>
++                {
++                    b.Property<Guid>("Id")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("Depot")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<Guid>("DriverId")
++                        .HasColumnType("uuid");
++
++                    b.Property<bool>("Express")
++                        .HasColumnType("boolean");
++
++                    b.Property<DateOnly>("ServiceDate")
++                        .HasColumnType("date");
++
++                    b.Property<DateTimeOffset?>("StartedAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<string>("Status")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.Property<Guid>("VehicleId")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("Zone")
++                        .IsRequired()
++                        .HasMaxLength(16)
++                        .HasColumnType("character varying(16)");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("ServiceDate", "Zone");
++
++                    b.ToTable("routes", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Infrastructure.Inbox.InboxMessage", b =>
++                {
++                    b.Property<Guid>("MessageId")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("uuid");
++
++                    b.Property<DateTimeOffset>("ProcessedAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<string>("Type")
++                        .IsRequired()
++                        .HasMaxLength(100)
++                        .HasColumnType("character varying(100)");
++
++                    b.HasKey("MessageId");
++
++                    b.HasIndex("ProcessedAt");
++
++                    b.ToTable("inbox_messages", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Infrastructure.Outbox.OutboxMessage", b =>
++                {
++                    b.Property<Guid>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("uuid");
++
++                    b.Property<int>("Attempts")
++                        .HasColumnType("integer");
++
++                    b.Property<DateTimeOffset?>("DispatchedAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<DateTimeOffset>("OccurredAt")
++                        .HasColumnType("timestamp with time zone");
++
++                    b.Property<string>("Payload")
++                        .IsRequired()
++                        .HasColumnType("jsonb");
++
++                    b.Property<string>("Type")
++                        .IsRequired()
++                        .HasMaxLength(100)
++                        .HasColumnType("character varying(100)");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("DispatchedAt", "OccurredAt");
++
++                    b.ToTable("outbox_messages", (string)null);
++                });
++
++            modelBuilder.Entity("Quellbrook.Dispatch.Domain.Routes.Route", b =>
++                {
++                    b.OwnsMany("Quellbrook.Dispatch.Domain.Routes.RouteStop", "Stops", b1 =>
++                        {
++                            b1.Property<Guid>("RouteId")
++                                .HasColumnType("uuid");
++
++                            b1.Property<Guid>("ConsignmentId")
++                                .HasColumnType("uuid");
++
++                            b1.Property<int>("Sequence")
++                                .HasColumnType("integer");
++
++                            b1.Property<int>("WeightGrams")
++                                .HasColumnType("integer");
++
++                            b1.HasKey("RouteId", "ConsignmentId");
++
++                            b1.ToTable("route_stops", (string)null);
++
++                            b1.WithOwner()
++                                .HasForeignKey("RouteId");
++                        });
++
++                    b.Navigation("Stops");
++                });
++#pragma warning restore 612, 618
++        }
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Persistence/Repositories.cs b/src/Quellbrook.Dispatch.Infrastructure/Persistence/Repositories.cs
+new file mode 100644
+index 0000000..fa3025f
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/Persistence/Repositories.cs
+@@ -0,0 +1,57 @@
++using Microsoft.EntityFrameworkCore;
++using Quellbrook.Dispatch.Domain.Assignment;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Infrastructure.Persistence;
++
++public sealed class EfConsignmentRepository(DispatchDbContext db) : IConsignmentRepository
++{
++    public Task<Consignment?> FindAsync(ConsignmentId id, CancellationToken cancellationToken) =>
++        db.Consignments.SingleOrDefaultAsync(consignment => consignment.Id == id, cancellationToken);
++
++    public Task<Consignment?> FindByOrderAsync(Guid orderId, CancellationToken cancellationToken) =>
++        db.Consignments.SingleOrDefaultAsync(consignment => consignment.OrderId == orderId, cancellationToken);
++
++    public async Task<IReadOnlyList<Consignment>> OnRouteAsync(RouteId routeId, CancellationToken cancellationToken) =>
++        await db.Consignments.Where(consignment => consignment.RouteId == routeId).ToListAsync(cancellationToken).ConfigureAwait(false);
++
++    public void Add(Consignment consignment) => db.Consignments.Add(consignment);
++}
++
++public sealed class EfRouteRepository(DispatchDbContext db) : IRouteRepository
++{
++    public Task<Route?> FindAsync(RouteId id, CancellationToken cancellationToken) =>
++        db.Routes.SingleOrDefaultAsync(route => route.Id == id, cancellationToken);
++
++    public async Task<IReadOnlyList<RouteCandidate>> CandidatesAsync(DateOnly serviceDate, CancellationToken cancellationToken)
++    {
++        var routes = await db.Routes
++            .Where(route => route.ServiceDate == serviceDate && route.Status == RouteStatus.Planned)
++            .ToListAsync(cancellationToken)
++            .ConfigureAwait(false);
++        var driverIds = routes.Select(route => route.DriverId).Distinct().ToList();
++        var vehicleIds = routes.Select(route => route.VehicleId).Distinct().ToList();
++        var drivers = await db.Drivers.Where(driver => driverIds.Contains(driver.Id)).ToDictionaryAsync(driver => driver.Id, cancellationToken)
++            .ConfigureAwait(false);
++        var vehicles = await db.Vehicles.Where(vehicle => vehicleIds.Contains(vehicle.Id)).ToDictionaryAsync(vehicle => vehicle.Id, cancellationToken)
++            .ConfigureAwait(false);
++        return [.. routes.Select(route => new RouteCandidate(route, vehicles[route.VehicleId], drivers[route.DriverId]))];
++    }
++
++    public void Add(Route route) => db.Routes.Add(route);
++}
++
++public sealed class EfFleetRepository(DispatchDbContext db) : IFleetRepository
++{
++    public Task<Driver?> FindDriverAsync(DriverId id, CancellationToken cancellationToken) =>
++        db.Drivers.SingleOrDefaultAsync(driver => driver.Id == id, cancellationToken);
++
++    public Task<Vehicle?> FindVehicleAsync(VehicleId id, CancellationToken cancellationToken) =>
++        db.Vehicles.SingleOrDefaultAsync(vehicle => vehicle.Id == id, cancellationToken);
++
++    public void Add(Driver driver) => db.Drivers.Add(driver);
++
++    public void Add(Vehicle vehicle) => db.Vehicles.Add(vehicle);
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/DesignTimeDbContextFactoryTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/DesignTimeDbContextFactoryTests.cs
+new file mode 100644
+index 0000000..37903d2
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/DesignTimeDbContextFactoryTests.cs
+@@ -0,0 +1,15 @@
++using Microsoft.EntityFrameworkCore;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++
++namespace Quellbrook.Dispatch.UnitTests.Infrastructure;
++
++public sealed class DesignTimeDbContextFactoryTests
++{
++    [Fact]
++    public void TheDesignTimeContextTargetsPostgreSQL()
++    {
++        using var context = new DesignTimeDbContextFactory().CreateDbContext([]);
++
++        Assert.Equal("Npgsql.EntityFrameworkCore.PostgreSQL", context.Database.ProviderName);
++    }
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/OutboxRelayTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/OutboxRelayTests.cs
+new file mode 100644
+index 0000000..772ab04
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/OutboxRelayTests.cs
+@@ -0,0 +1,118 @@
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Logging.Abstractions;
++using Microsoft.Extensions.Options;
++using Microsoft.Extensions.Time.Testing;
++using Quellbrook.Dispatch.Infrastructure.Outbox;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++using Quellbrook.Dispatch.UnitTests.TestSupport;
++
++namespace Quellbrook.Dispatch.UnitTests.Infrastructure;
++
++public sealed class OutboxRelayTests : IDisposable
++{
++    private readonly SqliteDispatchDb _db = new();
++    private readonly RecordingOutboxPublisher _publisher = new();
++    private readonly FakeTimeProvider _time = new(DispatchData.Now.AddMinutes(5));
++    private readonly ServiceProvider _services;
++
++    public OutboxRelayTests()
++    {
++        _services = new ServiceCollection().AddScoped(_ => _db.CreateContext()).BuildServiceProvider();
++    }
++
++    private OutboxRelay Relay(int batchSize = 50) =>
++        new(_services.GetRequiredService<IServiceScopeFactory>(), _publisher, _time,
++            Options.Create(new OutboxOptions { BatchSize = batchSize }), NullLogger<OutboxRelay>.Instance);
++
++    [Fact]
++    public async Task PendingMessagesArePublishedInOrderAndMarkedDispatched()
++    {
++        await StoreAsync(("dispatch.consignment-out-for-delivery.v1", 1), ("dispatch.consignment-delivered.v1", 2));
++
++        var dispatched = await Relay().DispatchPendingAsync(TestContext.Current.CancellationToken);
++
++        Assert.Equal(2, dispatched);
++        Assert.Equal(["dispatch.consignment-out-for-delivery.v1", "dispatch.consignment-delivered.v1"], _publisher.Published.Select(message => message.EventType));
++        using var context = _db.CreateContext();
++        Assert.All(context.OutboxMessages, message => Assert.Equal(_time.GetUtcNow(), message.DispatchedAt));
++    }
++
++    [Fact]
++    public async Task ADispatchedMessageIsNotPublishedAgain()
++    {
++        await StoreAsync(("dispatch.consignment-out-for-delivery.v1", 1));
++        await Relay().DispatchPendingAsync(TestContext.Current.CancellationToken);
++
++        var again = await Relay().DispatchPendingAsync(TestContext.Current.CancellationToken);
++
++        Assert.Equal(0, again);
++        Assert.Single(_publisher.Published);
++    }
++
++    [Fact]
++    public async Task AFailureStopsTheBatchKeepsOrderAndCountsTheAttempt()
++    {
++        await StoreAsync(("dispatch.consignment-out-for-delivery.v1", 1), ("dispatch.consignment-delivered.v1", 2), ("dispatch.consignment-out-for-delivery.v1", 3));
++        _publisher.FailOn = "dispatch.consignment-delivered.v1";
++
++        var dispatched = await Relay().DispatchPendingAsync(TestContext.Current.CancellationToken);
++
++        Assert.Equal(1, dispatched);
++        using var context = _db.CreateContext();
++        var failed = context.OutboxMessages.Single(message => message.Type == "dispatch.consignment-delivered.v1");
++        Assert.Null(failed.DispatchedAt);
++        Assert.Equal(1, failed.Attempts);
++        Assert.Equal(1, context.OutboxMessages.Count(message => message.DispatchedAt != null));
++    }
++
++    [Fact]
++    public async Task OneBatchTakesAtMostBatchSizeMessages()
++    {
++        await StoreAsync(("dispatch.consignment-out-for-delivery.v1", 1), ("dispatch.consignment-out-for-delivery.v1", 2), ("dispatch.consignment-out-for-delivery.v1", 3));
++
++        var dispatched = await Relay(batchSize: 2).DispatchPendingAsync(TestContext.Current.CancellationToken);
++
++        Assert.Equal(2, dispatched);
++    }
++
++    [Fact]
++    public async Task DispatchedMessagesOlderThanTheRetentionAreDeletedAndPendingOnesKept()
++    {
++        await StoreAsync(("dispatch.consignment-out-for-delivery.v1", 1), ("dispatch.consignment-out-for-delivery.v1", 2));
++        await Relay(batchSize: 1).DispatchPendingAsync(TestContext.Current.CancellationToken);
++
++        _time.Advance(TimeSpan.FromDays(6));
++        var early = await Relay().PurgeExpiredAsync(TestContext.Current.CancellationToken);
++        _time.Advance(TimeSpan.FromDays(2));
++        var due = await Relay().PurgeExpiredAsync(TestContext.Current.CancellationToken);
++
++        Assert.Equal(0, early);
++        Assert.Equal(1, due);
++        using var context = _db.CreateContext();
++        var left = Assert.Single(context.OutboxMessages);
++        Assert.Null(left.DispatchedAt);
++    }
++
++    private async Task StoreAsync(params (string Type, int Minute)[] messages)
++    {
++        using var context = _db.CreateContext();
++        foreach (var (type, minute) in messages)
++        {
++            context.OutboxMessages.Add(new OutboxMessage
++            {
++                Id = Guid.NewGuid(),
++                Type = type,
++                Payload = "{}",
++                OccurredAt = DispatchData.Now.AddMinutes(minute),
++            });
++        }
++
++        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
++    }
++
++    public void Dispose()
++    {
++        _services.Dispose();
++        _db.Dispose();
++    }
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/TestSupport/RecordingOutboxPublisher.cs b/tests/Quellbrook.Dispatch.UnitTests/TestSupport/RecordingOutboxPublisher.cs
+new file mode 100644
+index 0000000..38a80dc
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/TestSupport/RecordingOutboxPublisher.cs
+@@ -0,0 +1,23 @@
++using System.Text;
++using Quellbrook.Dispatch.Infrastructure.Outbox;
++
++namespace Quellbrook.Dispatch.UnitTests.TestSupport;
++
++internal sealed class RecordingOutboxPublisher : IOutboxPublisher
++{
++    public List<(Guid MessageId, string EventType, string Body)> Published { get; } = [];
++
++    /// <summary>Publishing the message with this event type throws, as a broker outage would.</summary>
++    public string? FailOn { get; set; }
++
++    public Task PublishAsync(Guid messageId, string eventType, ReadOnlyMemory<byte> body, CancellationToken cancellationToken)
++    {
++        if (eventType == FailOn)
++        {
++            throw new InvalidOperationException("broker unavailable");
++        }
++
++        Published.Add((messageId, eventType, Encoding.UTF8.GetString(body.Span)));
++        return Task.CompletedTask;
++    }
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/TestSupport/SqliteDispatchDb.cs b/tests/Quellbrook.Dispatch.UnitTests/TestSupport/SqliteDispatchDb.cs
+new file mode 100644
+index 0000000..016d786
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/TestSupport/SqliteDispatchDb.cs
+@@ -0,0 +1,44 @@
++using Microsoft.Data.Sqlite;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Infrastructure;
++using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++
++namespace Quellbrook.Dispatch.UnitTests.TestSupport;
++
++/// <summary>A throw-away in-memory SQLite database with the service's schema.</summary>
++internal sealed class SqliteDispatchDb : IDisposable
++{
++    private readonly SqliteConnection _connection = new("Data Source=:memory:");
++
++    public SqliteDispatchDb()
++    {
++        _connection.Open();
++        using var db = CreateContext();
++        db.Database.EnsureCreated();
++    }
++
++    public DispatchDbContext CreateContext() =>
++        new(new DbContextOptionsBuilder<DispatchDbContext>()
++            .UseSqlite(_connection)
++            .ReplaceService<IModelCustomizer, SqliteModelCustomizer>()
++            .Options);
++
++    public void Dispose() => _connection.Dispose();
++}
++
++/// <summary>SQLite cannot compare or order DateTimeOffset values; store them as ticks for the test database only.</summary>
++internal sealed class SqliteModelCustomizer(ModelCustomizerDependencies dependencies) : RelationalModelCustomizer(dependencies)
++{
++    public override void Customize(ModelBuilder modelBuilder, DbContext context)
++    {
++        base.Customize(modelBuilder, context);
++        foreach (var property in modelBuilder.Model.GetEntityTypes().SelectMany(entity => entity.GetProperties()))
++        {
++            if (property.ClrType == typeof(DateTimeOffset) || property.ClrType == typeof(DateTimeOffset?))
++            {
++                property.SetValueConverter(new DateTimeOffsetToBinaryConverter());
++            }
++        }
++    }
++}

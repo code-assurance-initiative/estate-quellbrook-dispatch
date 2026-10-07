@@ -1,0 +1,861 @@
+From 682bde4bac3e1373d1f0b3ac728065030987f57e Mon Sep 17 00:00:00 2001
+From: Wendy Achterberg <wendy.achterberg@example.invalid>
+Date: Fri, 31 Jul 2026 13:55:02 +0200
+Subject: feat: standard assignment, starting routes and recording deliveries
+
+---
+ .../ApplicationServiceCollectionExtensions.cs |  23 ++
+ .../Assignment/AssignConsignmentHandler.cs    |  52 +++++
+ .../Fleet/RegisterFleetHandlers.cs            |  56 +++++
+ .../Queries/DispatchViews.cs                  |  27 +++
+ .../Queries/IDispatchQueries.cs               |   9 +
+ .../Routes/PlanRouteHandler.cs                |  41 ++++
+ .../Routes/RecordDeliveryHandler.cs           |  32 +++
+ .../Routes/StartRouteHandler.cs               |  36 ++++
+ .../Assignment/AssignmentDecision.cs          |  11 +
+ .../Assignment/RouteCandidate.cs              |  10 +
+ .../Assignment/StandardAssignmentPolicy.cs    |  55 +++++
+ ...frastructureServiceCollectionExtensions.cs |  48 +++++
+ .../Application/HandlerTests.cs               | 197 ++++++++++++++++++
+ .../Domain/StandardAssignmentPolicyTests.cs   |  78 +++++++
+ .../Infrastructure/DispatchQueriesTests.cs    |  58 ++++++
+ 15 files changed, 733 insertions(+)
+ create mode 100644 src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/Assignment/AssignConsignmentHandler.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/Fleet/RegisterFleetHandlers.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/Queries/DispatchViews.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/Queries/IDispatchQueries.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/Routes/PlanRouteHandler.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/Routes/RecordDeliveryHandler.cs
+ create mode 100644 src/Quellbrook.Dispatch.Application/Routes/StartRouteHandler.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Assignment/AssignmentDecision.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Assignment/RouteCandidate.cs
+ create mode 100644 src/Quellbrook.Dispatch.Domain/Assignment/StandardAssignmentPolicy.cs
+ create mode 100644 src/Quellbrook.Dispatch.Infrastructure/InfrastructureServiceCollectionExtensions.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Application/HandlerTests.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Domain/StandardAssignmentPolicyTests.cs
+ create mode 100644 tests/Quellbrook.Dispatch.UnitTests/Infrastructure/DispatchQueriesTests.cs
+
+diff --git a/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs b/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs
+new file mode 100644
+index 0000000..d3dac2a
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/ApplicationServiceCollectionExtensions.cs
+@@ -0,0 +1,23 @@
++using Microsoft.Extensions.DependencyInjection;
++using Quellbrook.Dispatch.Application.Assignment;
++using Quellbrook.Dispatch.Application.Fleet;
++using Quellbrook.Dispatch.Application.Intake;
++using Quellbrook.Dispatch.Application.Routes;
++using Quellbrook.Dispatch.Domain.Assignment;
++
++namespace Quellbrook.Dispatch.Application;
++
++public static class ApplicationServiceCollectionExtensions
++{
++    public static IServiceCollection AddDispatchApplication(this IServiceCollection services)
++    {
++        services.AddSingleton(new StandardAssignmentPolicy());
++        services.AddScoped<OrderPlacedHandler>();
++        services.AddScoped<AssignConsignmentHandler>();
++        services.AddScoped<PlanRouteHandler>();
++        services.AddScoped<StartRouteHandler>();
++        services.AddScoped<RecordDeliveryHandler>();
++        services.AddScoped<RegisterFleetHandlers>();
++        return services;
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Application/Assignment/AssignConsignmentHandler.cs b/src/Quellbrook.Dispatch.Application/Assignment/AssignConsignmentHandler.cs
+new file mode 100644
+index 0000000..2849282
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Assignment/AssignConsignmentHandler.cs
+@@ -0,0 +1,52 @@
++using Quellbrook.Dispatch.Application.Abstractions;
++using Quellbrook.Dispatch.Domain.Assignment;
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Application.Assignment;
++
++public sealed record AssignConsignmentCommand(Guid ConsignmentId, DateOnly ServiceDate);
++
++/// <summary>Puts a waiting consignment on the route the assignment policy chooses.</summary>
++public sealed class AssignConsignmentHandler(
++    IConsignmentRepository consignments,
++    IRouteRepository routes,
++    StandardAssignmentPolicy standardPolicy,
++    IUnitOfWork unitOfWork)
++{
++    public async Task<OperationResult<RouteId>> HandleAsync(AssignConsignmentCommand command, CancellationToken cancellationToken)
++    {
++        ArgumentNullException.ThrowIfNull(command);
++        var consignment = await consignments.FindAsync(new ConsignmentId(command.ConsignmentId), cancellationToken).ConfigureAwait(false);
++        if (consignment is null)
++        {
++            return OperationResult.NotFound<RouteId>($"Consignment {command.ConsignmentId} does not exist.");
++        }
++
++        if (consignment.Status != ConsignmentStatus.AwaitingRoute)
++        {
++            return OperationResult.Conflict<RouteId>($"Consignment {consignment.Id} is {consignment.Status}.");
++        }
++
++        var candidates = await routes.CandidatesAsync(command.ServiceDate, cancellationToken).ConfigureAwait(false);
++        var decision = standardPolicy.Choose(consignment, candidates, command.ServiceDate);
++        if (decision.RouteId is not { } routeId)
++        {
++            return OperationResult.Conflict<RouteId>(decision.Reason ?? "No route available.");
++        }
++
++        var route = candidates.Single(candidate => candidate.Route.Id == routeId).Route;
++        try
++        {
++            route.AddStop(consignment);
++        }
++        catch (DomainException exception)
++        {
++            return OperationResult.Conflict<RouteId>(exception.Message);
++        }
++
++        await unitOfWork.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++        return OperationResult.Succeeded(routeId);
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Application/Fleet/RegisterFleetHandlers.cs b/src/Quellbrook.Dispatch.Application/Fleet/RegisterFleetHandlers.cs
+new file mode 100644
+index 0000000..ece93df
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Fleet/RegisterFleetHandlers.cs
+@@ -0,0 +1,56 @@
++using Quellbrook.Dispatch.Application.Abstractions;
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Fleet;
++
++namespace Quellbrook.Dispatch.Application.Fleet;
++
++public sealed record RegisterDriverCommand(string DisplayName, string Depot, LicenceCategory Licence, TimeOnly ShiftStart, TimeOnly ShiftEnd);
++
++public sealed record RegisterVehicleCommand(string Registration, string Depot, VehicleKind Kind, int CapacityGrams);
++
++/// <summary>Adds drivers and vehicles to a depot's fleet.</summary>
++public sealed class RegisterFleetHandlers(IFleetRepository fleet, IUnitOfWork unitOfWork, TimeProvider time)
++{
++    public async Task<OperationResult<DriverId>> RegisterDriverAsync(RegisterDriverCommand command, CancellationToken cancellationToken)
++    {
++        ArgumentNullException.ThrowIfNull(command);
++        try
++        {
++            var driver = Driver.Register(
++                new DriverId(Guid.CreateVersion7(time.GetUtcNow())),
++                command.DisplayName,
++                command.Depot,
++                command.Licence,
++                command.ShiftStart,
++                command.ShiftEnd);
++            fleet.Add(driver);
++            await unitOfWork.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++            return OperationResult.Succeeded(driver.Id);
++        }
++        catch (DomainException exception)
++        {
++            return OperationResult.Invalid<DriverId>(exception.Message);
++        }
++    }
++
++    public async Task<OperationResult<VehicleId>> RegisterVehicleAsync(RegisterVehicleCommand command, CancellationToken cancellationToken)
++    {
++        ArgumentNullException.ThrowIfNull(command);
++        try
++        {
++            var vehicle = Vehicle.Register(
++                new VehicleId(Guid.CreateVersion7(time.GetUtcNow())),
++                command.Registration,
++                command.Depot,
++                command.Kind,
++                command.CapacityGrams);
++            fleet.Add(vehicle);
++            await unitOfWork.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++            return OperationResult.Succeeded(vehicle.Id);
++        }
++        catch (DomainException exception)
++        {
++            return OperationResult.Invalid<VehicleId>(exception.Message);
++        }
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Application/Queries/DispatchViews.cs b/src/Quellbrook.Dispatch.Application/Queries/DispatchViews.cs
+new file mode 100644
+index 0000000..ae1d2a3
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Queries/DispatchViews.cs
+@@ -0,0 +1,27 @@
++namespace Quellbrook.Dispatch.Application.Queries;
++
++public sealed record RouteBoardEntry(
++    Guid RouteId,
++    string Depot,
++    string Zone,
++    bool Express,
++    string Status,
++    string DriverName,
++    string VehicleRegistration,
++    string VehicleKind,
++    int CapacityGrams,
++    int LoadGrams,
++    IReadOnlyList<RouteBoardStop> Stops);
++
++public sealed record RouteBoardStop(int Sequence, Guid ConsignmentId, Guid OrderId, string PostalCode, int WeightGrams, string Status);
++
++public sealed record ConsignmentView(
++    Guid ConsignmentId,
++    Guid OrderId,
++    string ServiceLevel,
++    string Zone,
++    string Status,
++    Guid? RouteId,
++    DateTimeOffset? OutForDeliveryAt,
++    DateTimeOffset? DeliveredAt,
++    string? Proof);
+diff --git a/src/Quellbrook.Dispatch.Application/Queries/IDispatchQueries.cs b/src/Quellbrook.Dispatch.Application/Queries/IDispatchQueries.cs
+new file mode 100644
+index 0000000..2a393db
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Queries/IDispatchQueries.cs
+@@ -0,0 +1,9 @@
++namespace Quellbrook.Dispatch.Application.Queries;
++
++/// <summary>The read side of the dispatch board and of the gateway's shipment view.</summary>
++public interface IDispatchQueries
++{
++    Task<IReadOnlyList<RouteBoardEntry>> BoardAsync(DateOnly serviceDate, CancellationToken cancellationToken);
++
++    Task<ConsignmentView?> ForOrderAsync(Guid orderId, CancellationToken cancellationToken);
++}
+diff --git a/src/Quellbrook.Dispatch.Application/Routes/PlanRouteHandler.cs b/src/Quellbrook.Dispatch.Application/Routes/PlanRouteHandler.cs
+new file mode 100644
+index 0000000..13a5322
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Routes/PlanRouteHandler.cs
+@@ -0,0 +1,41 @@
++using Quellbrook.Dispatch.Application.Abstractions;
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Application.Routes;
++
++public sealed record PlanRouteCommand(string Depot, string Zone, DateOnly ServiceDate, Guid DriverId, Guid VehicleId, bool Express);
++
++public sealed class PlanRouteHandler(IFleetRepository fleet, IRouteRepository routes, IUnitOfWork unitOfWork, TimeProvider time)
++{
++    public async Task<OperationResult<RouteId>> HandleAsync(PlanRouteCommand command, CancellationToken cancellationToken)
++    {
++        ArgumentNullException.ThrowIfNull(command);
++        var driver = await fleet.FindDriverAsync(new DriverId(command.DriverId), cancellationToken).ConfigureAwait(false);
++        var vehicle = await fleet.FindVehicleAsync(new VehicleId(command.VehicleId), cancellationToken).ConfigureAwait(false);
++        if (driver is null || vehicle is null)
++        {
++            return OperationResult.NotFound<RouteId>("The driver or the vehicle does not exist.");
++        }
++
++        try
++        {
++            var route = Route.Plan(
++                new RouteId(Guid.CreateVersion7(time.GetUtcNow())),
++                command.Depot,
++                command.Zone,
++                command.ServiceDate,
++                driver,
++                vehicle,
++                command.Express);
++            routes.Add(route);
++            await unitOfWork.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++            return OperationResult.Succeeded(route.Id);
++        }
++        catch (DomainException exception)
++        {
++            return OperationResult.Invalid<RouteId>(exception.Message);
++        }
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Application/Routes/RecordDeliveryHandler.cs b/src/Quellbrook.Dispatch.Application/Routes/RecordDeliveryHandler.cs
+new file mode 100644
+index 0000000..12ea218
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Routes/RecordDeliveryHandler.cs
+@@ -0,0 +1,32 @@
++using Quellbrook.Dispatch.Application.Abstractions;
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Consignments;
++
++namespace Quellbrook.Dispatch.Application.Routes;
++
++public sealed record RecordDeliveryCommand(Guid ConsignmentId, DeliveryProof Proof);
++
++public sealed class RecordDeliveryHandler(IConsignmentRepository consignments, IUnitOfWork unitOfWork, TimeProvider time)
++{
++    public async Task<OperationResult<ConsignmentId>> HandleAsync(RecordDeliveryCommand command, CancellationToken cancellationToken)
++    {
++        ArgumentNullException.ThrowIfNull(command);
++        var consignment = await consignments.FindAsync(new ConsignmentId(command.ConsignmentId), cancellationToken).ConfigureAwait(false);
++        if (consignment is null)
++        {
++            return OperationResult.NotFound<ConsignmentId>($"Consignment {command.ConsignmentId} does not exist.");
++        }
++
++        try
++        {
++            consignment.RecordDelivery(command.Proof, time.GetUtcNow());
++        }
++        catch (DomainException exception)
++        {
++            return OperationResult.Conflict<ConsignmentId>(exception.Message);
++        }
++
++        await unitOfWork.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++        return OperationResult.Succeeded(consignment.Id);
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Application/Routes/StartRouteHandler.cs b/src/Quellbrook.Dispatch.Application/Routes/StartRouteHandler.cs
+new file mode 100644
+index 0000000..d9dac65
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Application/Routes/StartRouteHandler.cs
+@@ -0,0 +1,36 @@
++using Quellbrook.Dispatch.Application.Abstractions;
++using Quellbrook.Dispatch.Domain.Common;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Application.Routes;
++
++/// <summary>The driver leaves the depot: the route starts and every consignment on it is out for delivery.</summary>
++public sealed class StartRouteHandler(
++    IRouteRepository routes,
++    IConsignmentRepository consignments,
++    IUnitOfWork unitOfWork,
++    TimeProvider time)
++{
++    public async Task<OperationResult<RouteId>> HandleAsync(Guid routeId, CancellationToken cancellationToken)
++    {
++        var route = await routes.FindAsync(new RouteId(routeId), cancellationToken).ConfigureAwait(false);
++        if (route is null)
++        {
++            return OperationResult.NotFound<RouteId>($"Route {routeId} does not exist.");
++        }
++
++        var onRoute = await consignments.OnRouteAsync(route.Id, cancellationToken).ConfigureAwait(false);
++        try
++        {
++            route.Start(onRoute, time.GetUtcNow());
++        }
++        catch (DomainException exception)
++        {
++            return OperationResult.Conflict<RouteId>(exception.Message);
++        }
++
++        await unitOfWork.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
++        return OperationResult.Succeeded(route.Id);
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Assignment/AssignmentDecision.cs b/src/Quellbrook.Dispatch.Domain/Assignment/AssignmentDecision.cs
+new file mode 100644
+index 0000000..7a7b671
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Assignment/AssignmentDecision.cs
+@@ -0,0 +1,11 @@
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Domain.Assignment;
++
++/// <summary>The route a consignment should go on, or why there is none.</summary>
++public sealed record AssignmentDecision(RouteId? RouteId, string? Reason)
++{
++    public static AssignmentDecision To(RouteId routeId) => new(routeId, null);
++
++    public static AssignmentDecision None(string reason) => new(null, reason);
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Assignment/RouteCandidate.cs b/src/Quellbrook.Dispatch.Domain/Assignment/RouteCandidate.cs
+new file mode 100644
+index 0000000..14e04b5
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Assignment/RouteCandidate.cs
+@@ -0,0 +1,10 @@
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Domain.Assignment;
++
++/// <summary>A planned route together with the vehicle and driver it uses, as the assignment policies see it.</summary>
++public sealed record RouteCandidate(Route Route, Vehicle Vehicle, Driver Driver)
++{
++    public int RemainingGrams => Vehicle.CapacityGrams - Route.LoadGrams;
++}
+diff --git a/src/Quellbrook.Dispatch.Domain/Assignment/StandardAssignmentPolicy.cs b/src/Quellbrook.Dispatch.Domain/Assignment/StandardAssignmentPolicy.cs
+new file mode 100644
+index 0000000..3ee6659
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Domain/Assignment/StandardAssignmentPolicy.cs
+@@ -0,0 +1,55 @@
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Routes;
++
++namespace Quellbrook.Dispatch.Domain.Assignment;
++
++/// <summary>
++/// Standard service: the consignment goes on a planned standard route of its own zone for the service date, on the
++/// route whose vehicle it fills best (least capacity left over), so that space for large consignments is kept.
++/// </summary>
++public sealed class StandardAssignmentPolicy(double minimumShiftHours = StandardAssignmentPolicy.DefaultMinimumShiftHours)
++{
++    /// <summary>By default a driver needs at least this long a shift to take on another stop.</summary>
++    public const double DefaultMinimumShiftHours = 4;
++
++    public AssignmentDecision Choose(Consignment consignment, IReadOnlyList<RouteCandidate> candidates, DateOnly serviceDate)
++    {
++        ArgumentNullException.ThrowIfNull(consignment);
++        ArgumentNullException.ThrowIfNull(candidates);
++        RouteCandidate? best = null;
++        foreach (var candidate in candidates)
++        {
++            var route = candidate.Route;
++            if (route.Status != RouteStatus.Planned || route.Express || route.ServiceDate != serviceDate || route.Zone != consignment.Zone)
++            {
++                continue;
++            }
++
++            var remaining = candidate.Vehicle.CapacityGrams - route.LoadGrams;
++            if (remaining < consignment.TotalWeightGrams)
++            {
++                continue;
++            }
++
++            var driver = candidate.Driver;
++            if (!driver.Active || driver.ShiftHours < minimumShiftHours)
++            {
++                continue;
++            }
++
++            if (driver.Licence < candidate.Vehicle.RequiredLicence)
++            {
++                continue;
++            }
++
++            if (best is null || remaining < best.RemainingGrams)
++            {
++                best = candidate;
++            }
++        }
++
++        return best is null
++            ? AssignmentDecision.None($"No standard route in zone {consignment.Zone} on {serviceDate:yyyy-MM-dd} has room for {consignment.TotalWeightGrams} g.")
++            : AssignmentDecision.To(best.Route.Id);
++    }
++}
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/InfrastructureServiceCollectionExtensions.cs b/src/Quellbrook.Dispatch.Infrastructure/InfrastructureServiceCollectionExtensions.cs
+new file mode 100644
+index 0000000..c975a0c
+--- /dev/null
++++ b/src/Quellbrook.Dispatch.Infrastructure/InfrastructureServiceCollectionExtensions.cs
+@@ -0,0 +1,48 @@
++using Microsoft.EntityFrameworkCore;
++using Microsoft.Extensions.Configuration;
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Options;
++using Quellbrook.Dispatch.Application.Abstractions;
++using Quellbrook.Dispatch.Application.Queries;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Domain.Routes;
++using Quellbrook.Dispatch.Infrastructure.Inbox;
++using Quellbrook.Dispatch.Infrastructure.Messaging;
++using Quellbrook.Dispatch.Infrastructure.Outbox;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++using RabbitMQ.Client;
++
++namespace Quellbrook.Dispatch.Infrastructure;
++
++public static class InfrastructureServiceCollectionExtensions
++{
++    public static IServiceCollection AddDispatchInfrastructure(this IServiceCollection services, IConfiguration configuration)
++    {
++        services.AddDbContext<DispatchDbContext>(options => options.UseNpgsql(configuration.GetConnectionString("Dispatch")));
++        services.AddScoped<IUnitOfWork>(provider => provider.GetRequiredService<DispatchDbContext>());
++        services.AddScoped<IConsignmentRepository, EfConsignmentRepository>();
++        services.AddScoped<IRouteRepository, EfRouteRepository>();
++        services.AddScoped<IFleetRepository, EfFleetRepository>();
++        services.AddScoped<IDispatchQueries, DispatchQueries>();
++
++        services.AddOptions<RabbitMqOptions>()
++            .BindConfiguration(RabbitMqOptions.SectionName)
++            .ValidateDataAnnotations()
++            .ValidateOnStart();
++        services.AddSingleton<IConnectionFactory>(provider =>
++            RabbitMqConnectionProvider.CreateFactory(provider.GetRequiredService<IOptions<RabbitMqOptions>>()));
++        services.AddSingleton<IRabbitMqConnectionProvider, RabbitMqConnectionProvider>();
++        services.AddSingleton<IOutboxPublisher, RabbitMqPublisher>();
++        services.AddOptions<OutboxOptions>()
++            .BindConfiguration(OutboxOptions.SectionName)
++            .ValidateDataAnnotations()
++            .ValidateOnStart();
++        services.AddHostedService<OutboxRelay>();
++        services.AddSingleton<InboxProcessor>();
++        services.AddHostedService<OrderEventsConsumer>();
++
++        services.AddHealthChecks().AddDbContextCheck<DispatchDbContext>("database", tags: ["ready"]);
++        return services;
++    }
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Application/HandlerTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Application/HandlerTests.cs
+new file mode 100644
+index 0000000..d6858be
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Application/HandlerTests.cs
+@@ -0,0 +1,197 @@
++using Microsoft.EntityFrameworkCore;
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Logging.Abstractions;
++using Quellbrook.Dispatch.Application;
++using Quellbrook.Dispatch.Application.Assignment;
++using Quellbrook.Dispatch.Application.Fleet;
++using Quellbrook.Dispatch.Application.Intake;
++using Quellbrook.Dispatch.Application.Routes;
++using Quellbrook.Dispatch.Domain.Assignment;
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++using Quellbrook.Dispatch.UnitTests.TestSupport;
++
++namespace Quellbrook.Dispatch.UnitTests.Application;
++
++public sealed class HandlerTests : IDisposable
++{
++    private readonly DbFixture _fixture = new();
++
++    private static OrderPlacedMessage Placed(Guid orderId, string serviceLevel = "standard") =>
++        new(orderId, serviceLevel, new(new("8000", "DK")), [new(2_400), new(1_100)], DispatchData.Now);
++
++    [Fact]
++    public async Task AnAnnouncedOrderBecomesOneConsignmentEvenWhenAnnouncedTwice()
++    {
++        var orderId = Guid.NewGuid();
++        using (var scope = _fixture.Services.CreateScope())
++        {
++            var handler = scope.ServiceProvider.GetRequiredService<OrderPlacedHandler>();
++            await handler.HandleAsync(Placed(orderId), TestContext.Current.CancellationToken);
++            await handler.HandleAsync(Placed(orderId), TestContext.Current.CancellationToken);
++        }
++
++        using var context = _fixture.Context();
++        var consignment = await context.Consignments.SingleAsync(TestContext.Current.CancellationToken);
++        Assert.Equal(orderId, consignment.OrderId);
++        Assert.Equal(3_500, consignment.TotalWeightGrams);
++        Assert.Equal("DK-AAR", consignment.Zone);
++    }
++
++    [Fact]
++    public async Task AWaitingConsignmentIsAssignedToTheBestStandardRoute()
++    {
++        var (consignment, candidate) = await SeedRouteAndConsignmentAsync();
++
++        var result = await AssignAsync(consignment.Id.Value);
++
++        Assert.Equal(OperationStatus.Succeeded, result.Status);
++        Assert.Equal(candidate.Route.Id, result.Value);
++        using var context = _fixture.Context();
++        Assert.Equal(ConsignmentStatus.Assigned, (await context.Consignments.SingleAsync(TestContext.Current.CancellationToken)).Status);
++        Assert.Single((await context.Routes.SingleAsync(TestContext.Current.CancellationToken)).Stops);
++    }
++
++    [Fact]
++    public async Task WithoutARouteInTheZoneTheAssignmentIsAConflict()
++    {
++        var (consignment, _) = await SeedRouteAndConsignmentAsync(zone: "DK-FYN");
++
++        var result = await AssignAsync(consignment.Id.Value);
++
++        Assert.Equal(OperationStatus.Conflict, result.Status);
++    }
++
++    [Fact]
++    public async Task AnUnknownOrAlreadyAssignedConsignmentIsRefused()
++    {
++        var (consignment, _) = await SeedRouteAndConsignmentAsync();
++        await AssignAsync(consignment.Id.Value);
++
++        var again = await AssignAsync(consignment.Id.Value);
++        var unknown = await AssignAsync(Guid.NewGuid());
++
++        Assert.Equal(OperationStatus.Conflict, again.Status);
++        Assert.Equal(OperationStatus.NotFound, unknown.Status);
++    }
++
++    [Fact]
++    public async Task StartingARouteAndRecordingADeliveryWriteTheirEventsToTheOutbox()
++    {
++        var (consignment, candidate) = await SeedRouteAndConsignmentAsync();
++        await AssignAsync(consignment.Id.Value);
++
++        using (var context = _fixture.Context())
++        {
++            var start = await new StartRouteHandler(new EfRouteRepository(context), new EfConsignmentRepository(context), context, _fixture.Time)
++                .HandleAsync(candidate.Route.Id.Value, TestContext.Current.CancellationToken);
++            Assert.Equal(OperationStatus.Succeeded, start.Status);
++        }
++
++        using (var context = _fixture.Context())
++        {
++            var delivered = await new RecordDeliveryHandler(new EfConsignmentRepository(context), context, _fixture.Time)
++                .HandleAsync(new RecordDeliveryCommand(consignment.Id.Value, DeliveryProof.Photo), TestContext.Current.CancellationToken);
++            Assert.Equal(OperationStatus.Succeeded, delivered.Status);
++        }
++
++        using var reading = _fixture.Context();
++        Assert.Equal(
++            ["dispatch.consignment-out-for-delivery.v1", "dispatch.consignment-delivered.v1"],
++            await reading.OutboxMessages.OrderBy(message => message.OccurredAt).Select(message => message.Type).ToListAsync(TestContext.Current.CancellationToken));
++        Assert.Contains("\"proof\":\"photo\"", (await reading.OutboxMessages.SingleAsync(message => message.Type == "dispatch.consignment-delivered.v1", TestContext.Current.CancellationToken)).Payload, StringComparison.Ordinal);
++    }
++
++    [Fact]
++    public async Task StartingAnUnknownOrEmptyRouteFails()
++    {
++        var candidate = DispatchData.Candidate();
++        await _fixture.SeedAsync(context =>
++        {
++            context.Drivers.Add(candidate.Driver);
++            context.Vehicles.Add(candidate.Vehicle);
++            context.Routes.Add(candidate.Route);
++            return 0;
++        });
++        using var context = _fixture.Context();
++        var handler = new StartRouteHandler(new EfRouteRepository(context), new EfConsignmentRepository(context), context, _fixture.Time);
++
++        Assert.Equal(OperationStatus.Conflict, (await handler.HandleAsync(candidate.Route.Id.Value, TestContext.Current.CancellationToken)).Status);
++        Assert.Equal(OperationStatus.NotFound, (await handler.HandleAsync(Guid.NewGuid(), TestContext.Current.CancellationToken)).Status);
++    }
++
++    [Fact]
++    public async Task DeliveringAConsignmentThatIsNotOutIsAConflict()
++    {
++        var (consignment, _) = await SeedRouteAndConsignmentAsync();
++        using var context = _fixture.Context();
++        var handler = new RecordDeliveryHandler(new EfConsignmentRepository(context), context, _fixture.Time);
++
++        Assert.Equal(OperationStatus.Conflict, (await handler.HandleAsync(new RecordDeliveryCommand(consignment.Id.Value, DeliveryProof.Signature), TestContext.Current.CancellationToken)).Status);
++        Assert.Equal(OperationStatus.NotFound, (await handler.HandleAsync(new RecordDeliveryCommand(Guid.NewGuid(), DeliveryProof.Signature), TestContext.Current.CancellationToken)).Status);
++    }
++
++    [Fact]
++    public async Task DriversVehiclesAndRoutesAreRegisteredAndPlanned()
++    {
++        using var context = _fixture.Context();
++        var fleet = new RegisterFleetHandlers(new EfFleetRepository(context), context, _fixture.Time);
++        var driver = await fleet.RegisterDriverAsync(new RegisterDriverCommand("Anna K.", "aar", LicenceCategory.C1, new(7, 0), new(15, 0)), TestContext.Current.CancellationToken);
++        var vehicle = await fleet.RegisterVehicleAsync(new RegisterVehicleCommand("qb 98 765", "aar", VehicleKind.Rigid, 3_000_000), TestContext.Current.CancellationToken);
++        var badDriver = await fleet.RegisterDriverAsync(new RegisterDriverCommand("Bo L.", "AAR", LicenceCategory.B, new(15, 0), new(7, 0)), TestContext.Current.CancellationToken);
++        var badVehicle = await fleet.RegisterVehicleAsync(new RegisterVehicleCommand("QB 1", "AAR", VehicleKind.Van, 0), TestContext.Current.CancellationToken);
++
++        var plan = new PlanRouteHandler(new EfFleetRepository(context), new EfRouteRepository(context), context, _fixture.Time);
++        var route = await plan.HandleAsync(new PlanRouteCommand("AAR", "DK-AAR", DispatchData.Today, driver.Value.Value, vehicle.Value.Value, Express: false), TestContext.Current.CancellationToken);
++        var missing = await plan.HandleAsync(new PlanRouteCommand("AAR", "DK-AAR", DispatchData.Today, Guid.NewGuid(), vehicle.Value.Value, Express: false), TestContext.Current.CancellationToken);
++
++        Assert.Equal(OperationStatus.Succeeded, route.Status);
++        Assert.Equal(OperationStatus.NotFound, missing.Status);
++        Assert.Equal(OperationStatus.Invalid, badDriver.Status);
++        Assert.Equal(OperationStatus.Invalid, badVehicle.Status);
++        Assert.Equal("QB 98 765", (await context.Vehicles.SingleAsync(TestContext.Current.CancellationToken)).Registration);
++    }
++
++    [Fact]
++    public async Task PlanningWithADriverWithoutTheLicenceIsInvalid()
++    {
++        var driver = DispatchData.Driver(LicenceCategory.B);
++        var rigid = DispatchData.Rigid();
++        await _fixture.SeedAsync(context =>
++        {
++            context.Drivers.Add(driver);
++            context.Vehicles.Add(rigid);
++            return 0;
++        });
++        using var context = _fixture.Context();
++        var plan = new PlanRouteHandler(new EfFleetRepository(context), new EfRouteRepository(context), context, _fixture.Time);
++
++        var result = await plan.HandleAsync(new PlanRouteCommand("AAR", "DK-AAR", DispatchData.Today, driver.Id.Value, rigid.Id.Value, Express: false), TestContext.Current.CancellationToken);
++
++        Assert.Equal(OperationStatus.Invalid, result.Status);
++    }
++
++    private async Task<OperationResult<Quellbrook.Dispatch.Domain.Routes.RouteId>> AssignAsync(Guid consignmentId)
++    {
++        using var context = _fixture.Context();
++        var handler = new AssignConsignmentHandler(new EfConsignmentRepository(context), new EfRouteRepository(context), new StandardAssignmentPolicy(), context);
++        return await handler.HandleAsync(new AssignConsignmentCommand(consignmentId, DispatchData.Today), TestContext.Current.CancellationToken);
++    }
++
++    private Task<(Consignment Consignment, RouteCandidate Candidate)> SeedRouteAndConsignmentAsync(string zone = "DK-AAR")
++    {
++        var candidate = DispatchData.Candidate(zone: zone);
++        var consignment = DispatchData.Consignment();
++        return _fixture.SeedAsync(context =>
++        {
++            context.Drivers.Add(candidate.Driver);
++            context.Vehicles.Add(candidate.Vehicle);
++            context.Routes.Add(candidate.Route);
++            context.Consignments.Add(consignment);
++            return (consignment, candidate);
++        });
++    }
++
++    public void Dispose() => _fixture.Dispose();
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Domain/StandardAssignmentPolicyTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Domain/StandardAssignmentPolicyTests.cs
+new file mode 100644
+index 0000000..2d0dc09
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Domain/StandardAssignmentPolicyTests.cs
+@@ -0,0 +1,78 @@
++using Quellbrook.Dispatch.Domain.Assignment;
++using Quellbrook.Dispatch.Domain.Fleet;
++using Quellbrook.Dispatch.UnitTests.TestSupport;
++
++namespace Quellbrook.Dispatch.UnitTests.Domain;
++
++public sealed class StandardAssignmentPolicyTests
++{
++    private readonly StandardAssignmentPolicy _policy = new();
++
++    [Fact]
++    public void TheRouteWhoseVehicleItFillsBestIsChosen()
++    {
++        var roomy = DispatchData.Candidate(vehicle: DispatchData.Van(capacityGrams: 1_000_000));
++        var tight = DispatchData.Candidate(vehicle: DispatchData.Van(capacityGrams: 10_000));
++
++        var decision = _policy.Choose(DispatchData.Consignment(), [roomy, tight], DispatchData.Today);
++
++        Assert.Equal(tight.Route.Id, decision.RouteId);
++    }
++
++    [Fact]
++    public void RoutesOfOtherZonesOtherDaysAndExpressRunsAreNotCandidates()
++    {
++        var candidates = new[]
++        {
++            DispatchData.Candidate(zone: "DK-FYN"),
++            DispatchData.Candidate(date: DispatchData.Today.AddDays(1)),
++            DispatchData.Candidate(express: true),
++        };
++
++        var decision = _policy.Choose(DispatchData.Consignment(), candidates, DispatchData.Today);
++
++        Assert.Null(decision.RouteId);
++        Assert.Contains("DK-AAR", decision.Reason, StringComparison.Ordinal);
++    }
++
++    [Fact]
++    public void AFullVehicleIsSkipped()
++    {
++        var full = DispatchData.Candidate(vehicle: DispatchData.Van(capacityGrams: 2_000));
++
++        Assert.Null(_policy.Choose(DispatchData.Consignment(), [full], DispatchData.Today).RouteId);
++    }
++
++    [Fact]
++    public void ADriverWithAShortShiftOrInactiveIsSkipped()
++    {
++        var shortShift = DispatchData.Candidate(driver: DispatchData.Driver(shiftStart: 7, shiftEnd: 10));
++        var inactiveDriver = DispatchData.Driver();
++        var inactive = DispatchData.Candidate(driver: inactiveDriver);
++        inactiveDriver.Deactivate();
++
++        Assert.Null(_policy.Choose(DispatchData.Consignment(), [shortShift, inactive], DispatchData.Today).RouteId);
++    }
++
++    [Fact]
++    public void ADriverWithoutTheVehiclesLicenceIsSkipped()
++    {
++        var driver = DispatchData.Driver(LicenceCategory.C1);
++        var candidate = DispatchData.Candidate(vehicle: DispatchData.Rigid(), driver: driver);
++        var downgraded = candidate with { Driver = DispatchData.Driver(LicenceCategory.B) };
++
++        Assert.Null(_policy.Choose(DispatchData.Consignment(), [downgraded], DispatchData.Today).RouteId);
++    }
++
++    [Fact]
++    public void ARouteForTodayTakesConsignmentsUntilItsVehicleIsFull()
++    {
++        var today = DateOnly.FromDateTime(DateTime.Now);
++        var candidate = DispatchData.Candidate(vehicle: DispatchData.Van(capacityGrams: 5_000), date: today);
++        var first = DispatchData.Consignment(weights: 3_000);
++
++        Assert.Equal(candidate.Route.Id, _policy.Choose(first, [candidate], DateOnly.FromDateTime(DateTime.UtcNow)).RouteId);
++        candidate.Route.AddStop(first);
++        Assert.Null(_policy.Choose(DispatchData.Consignment(weights: 3_000), [candidate], DateOnly.FromDateTime(DateTime.UtcNow)).RouteId);
++    }
++}
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/DispatchQueriesTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/DispatchQueriesTests.cs
+new file mode 100644
+index 0000000..6600500
+--- /dev/null
++++ b/tests/Quellbrook.Dispatch.UnitTests/Infrastructure/DispatchQueriesTests.cs
+@@ -0,0 +1,58 @@
++using Quellbrook.Dispatch.Domain.Consignments;
++using Quellbrook.Dispatch.Infrastructure.Persistence;
++using Quellbrook.Dispatch.UnitTests.TestSupport;
++
++namespace Quellbrook.Dispatch.UnitTests.Infrastructure;
++
++public sealed class DispatchQueriesTests : IDisposable
++{
++    private readonly DbFixture _fixture = new();
++
++    [Fact]
++    public async Task TheBoardShowsEachRouteOfTheDayWithItsVehicleDriverAndStops()
++    {
++        var candidate = DispatchData.Candidate();
++        var consignment = DispatchData.Consignment(postalCode: "8200");
++        candidate.Route.AddStop(consignment);
++        await _fixture.SeedAsync(context =>
++        {
++            context.Drivers.Add(candidate.Driver);
++            context.Vehicles.Add(candidate.Vehicle);
++            context.Routes.Add(candidate.Route);
++            context.Consignments.Add(consignment);
++            return 0;
++        });
++        using var context = _fixture.Context();
++
++        var board = await new DispatchQueries(context).BoardAsync(DispatchData.Today, TestContext.Current.CancellationToken);
++        var tomorrow = await new DispatchQueries(context).BoardAsync(DispatchData.Today.AddDays(1), TestContext.Current.CancellationToken);
++
++        var entry = Assert.Single(board);
++        Assert.Equal("Anna K.", entry.DriverName);
++        Assert.Equal("Van", entry.VehicleKind);
++        Assert.Equal(2_400, entry.LoadGrams);
++        var stop = Assert.Single(entry.Stops);
++        Assert.Equal(("8200", "Assigned"), (stop.PostalCode, stop.Status));
++        Assert.Empty(tomorrow);
++    }
++
++    [Fact]
++    public async Task AConsignmentIsFoundByItsOrder()
++    {
++        var consignment = DispatchData.Consignment();
++        consignment.AssignTo(new Quellbrook.Dispatch.Domain.Routes.RouteId(Guid.NewGuid()));
++        consignment.MarkOutForDelivery(DispatchData.Now);
++        consignment.RecordDelivery(DeliveryProof.SafePlace, DispatchData.Now.AddHours(2));
++        await _fixture.SeedAsync(context => context.Consignments.Add(consignment));
++        using var context = _fixture.Context();
++
++        var view = await new DispatchQueries(context).ForOrderAsync(consignment.OrderId, TestContext.Current.CancellationToken);
++        var none = await new DispatchQueries(context).ForOrderAsync(Guid.NewGuid(), TestContext.Current.CancellationToken);
++
++        Assert.NotNull(view);
++        Assert.Equal(("Delivered", "safe-place"), (view.Status, view.Proof));
++        Assert.Null(none);
++    }
++
++    public void Dispose() => _fixture.Dispose();
++}

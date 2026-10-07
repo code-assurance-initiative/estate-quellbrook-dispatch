@@ -1,0 +1,42 @@
+From a82838aed9a2ceda89fba50780940f9011913255 Mon Sep 17 00:00:00 2001
+From: Kasper Nyholt <kasper.nyholt@example.invalid>
+Date: Fri, 21 Aug 2026 16:45:10 +0200
+Subject: release 0.2.0
+
+---
+ CHANGELOG.md          | 8 ++++++++
+ Directory.Build.props | 2 +-
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 33b72a1..493f1a3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,14 @@
+ All notable changes to this project are documented here. The format follows
+ [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
+ 
++## [0.2.0] - 2026-08-21
++
++### Added
++- Same-day express assignment (ADR 0004): cut-off 14:00, express runs first, adjacent zones for small consignments,
++  rigid vehicles for heavy ones, the driver's break.
++- Consignments of cancelled orders are dropped from their route (`orders.order-cancelled.v1`).
++- `GET /drivers/available` for the dispatch board's route planner.
++
+ ## [0.1.0] - 2026-08-07
+ 
+ ### Added
+diff --git a/Directory.Build.props b/Directory.Build.props
+index a890668..6bd555c 100644
+--- a/Directory.Build.props
++++ b/Directory.Build.props
+@@ -10,7 +10,7 @@
+     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+     <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+-    <Version>0.1.0</Version>
++    <Version>0.2.0</Version>
+     <Authors>Quellbrook Freight</Authors>
+     <Copyright>Copyright (c) 2026 Quellbrook Freight</Copyright>
+   </PropertyGroup>

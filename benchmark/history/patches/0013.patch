@@ -1,0 +1,41 @@
+From f03edd6731d60d47df06c93a9b37d3254f61a575 Mon Sep 17 00:00:00 2001
+From: Kasper Nyholt <kasper.nyholt@example.invalid>
+Date: Mon, 10 Aug 2026 09:52:14 +0200
+Subject: docs: ADR 0004 same-day express service
+
+---
+ docs/adr/0004-same-day-express.md | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+ create mode 100644 docs/adr/0004-same-day-express.md
+
+diff --git a/docs/adr/0004-same-day-express.md b/docs/adr/0004-same-day-express.md
+new file mode 100644
+index 0000000..b2388b0
+--- /dev/null
++++ b/docs/adr/0004-same-day-express.md
+@@ -0,0 +1,25 @@
++# 4. Same-day express service
++
++- Status: Accepted
++- Date: 2026-08-10
++- Deciders: Kasper Nyholt, Dario Fenwick, Ruth Calloway (Orders)
++
++## Context
++
++Orders accepts express orders since 0.1.0, but dispatch plans them like standard ones, for the next day. Sales has
++promised same-day delivery in the Aarhus and Copenhagen zones from 2026-08-24.
++
++## Decision
++
++An express consignment received on a working day before the 14:00 cut-off (depot time) is assigned to a route of the
++same day: preferably a dedicated express run, otherwise a standard route that has not left yet and still has a
++10 % capacity buffer. A route of an adjacent zone may take a small express consignment (at most two parcels).
++Consignments over 20 kg need a rigid vehicle and a C1 driver. A driver who has worked 4.5 hours without a started
++route is not given more express stops (the mandatory break). After the cut-off an express consignment is planned as
++standard for the next day and the shipper is credited.
++
++## Consequences
++
++- Positive: same-day delivery without a separate fleet; express runs fill up first.
++- Negative: the assignment rules for express are more involved than for standard and depend on the time of day,
++  which makes them harder to test; dispatchers must plan express runs before 10:00 to make use of them.

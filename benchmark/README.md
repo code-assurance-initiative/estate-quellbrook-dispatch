@@ -78,11 +78,13 @@ v0.1.0**, **better at v0.3.0 than at v0.2.0**, and **still worse at v0.3.0 than 
 | TRP-011 | `missing-image-healthcheck` | `src/Quellbrook.Dispatch.Api/Dockerfile` | The image runs only on Kubernetes, which ignores a Dockerfile HEALTHCHECK; the probes are in deploy/k8s/deployment.yaml. |
 | TRP-012 | `compiled-code-size` | `src/Quellbrook.Dispatch.Domain/Consignments/DeliveryZones.cs:10-14` | DeliveryZones.ZoneFor compiles to a large IL body because its switch expression is a twenty-row lookup table of postal districts; the size measures the table, not logic. |
 | TRP-013 | `integration-event-leaks-domain-type` | `src/Quellbrook.Dispatch.Api/Contracts/Requests.cs:6` | RegisterDriverRequest is the HTTP request body of POST /fleet/drivers, deserialised inside the dispatch service itself, not an integration event another service consumes; using the domain's own LicenceCategory enum for it couples nothing across a boundary. (The same holds for the vehicle and delivery requests in this file.) |
+| TRP-014 | `non-idempotent-message-handler` | `src/Quellbrook.Dispatch.Application/Routes/PlanRouteHandler.cs:12` | Planning a route is guarded: the handler refuses a second route for a driver on the same day (an exists check backed by a unique index), so a retried or double-submitted plan cannot create a duplicate. |
+| TRP-015 | `adr-quality` | `docs/adr/0001-record-architecture-decisions.md` | ADR 0001 records the decision to record decisions (Nygard's first ADR). A process decision is a legitimate and conventional first record; it has status, context, decision and two-sided consequences. |
 | TRP-008 | `cleartext-transmission` | `src/Quellbrook.Dispatch.Api/appsettings.Development.json:9` | appsettings.Development.json points the broker at amqp://localhost for a developer's local RabbitMQ container; production configuration uses amqps. Plain AMQP to the loopback interface crosses no network. |
 
 ## Certified clean
 
-157 `clean` entries, one per tracked file: files without a label are certified clean for every concept (`"*"`); a file that carries a plant or a trap is certified clean for every finding concept except the labelled ones and the concepts a result of those labels would restate.
+192 `clean` entries, one per tracked file: files without a label are certified clean for every concept (`"*"`); a file that carries a plant or a trap is certified clean for every finding concept except the labelled ones and the concepts a result of those labels would restate.
 
 ## Not applicable
 
@@ -145,3 +147,4 @@ Bands were set from the intent of the code, before any scan, and are wide where 
 | BND-035 | `data-retention-policy` | 0–60 | Consignments keep a delivery postcode district and no names or contact data; no retention job. |
 | BND-036 | `audit-trail` | 0–70 | No record of who planned, assigned or delivered beyond timestamps. |
 | BND-037 | `data-subject-rights` | 0–60 | The service holds no direct identifiers of people other than drivers' display names. |
+| BND-038 | `architecture-rules-unenforced` | 0–60 | ADR 0002 states a checkable layering rule (endpoints take no DbContext) and nothing but review enforces it: no architecture test, no analyzer rule. The sprint-2 bypass (DSP-004) is what that lets through. |

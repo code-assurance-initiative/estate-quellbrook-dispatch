@@ -1,0 +1,72 @@
+From 545daf1f8b0f41687dd4e9c399a0cb0d0e6f4e47 Mon Sep 17 00:00:00 2001
+From: Kasper Nyholt <kasper.nyholt@example.invalid>
+Date: Mon, 27 Jul 2026 15:20:08 +0200
+Subject: docs: ADR 0001 (record decisions) and ADR 0002 (endpoints call
+ application handlers)
+
+---
+ .../adr/0001-record-architecture-decisions.md | 20 ++++++++++++++
+ ...002-endpoints-call-application-handlers.md | 27 +++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+ create mode 100644 docs/adr/0001-record-architecture-decisions.md
+ create mode 100644 docs/adr/0002-endpoints-call-application-handlers.md
+
+diff --git a/docs/adr/0001-record-architecture-decisions.md b/docs/adr/0001-record-architecture-decisions.md
+new file mode 100644
+index 0000000..38b953a
+--- /dev/null
++++ b/docs/adr/0001-record-architecture-decisions.md
+@@ -0,0 +1,20 @@
++# 1. Record architecture decisions
++
++- Status: Accepted
++- Date: 2026-07-27
++- Deciders: Kasper Nyholt, Wendy Achterberg
++
++## Context
++
++Dispatch is new, sits between the order service and the notifier, and will be changed by people who were not there
++when it was designed. Decisions made in conversation are lost.
++
++## Decision
++
++We record every decision that shapes the service's structure, contracts or operation as an architecture decision
++record in `docs/adr`, numbered, with status, context, decision and consequences.
++
++## Consequences
++
++- Positive: the reasons behind the structure survive staff changes; reviews can point at a record.
++- Negative: records take time to write and must be marked superseded when a decision changes.
+diff --git a/docs/adr/0002-endpoints-call-application-handlers.md b/docs/adr/0002-endpoints-call-application-handlers.md
+new file mode 100644
+index 0000000..3cd7d3e
+--- /dev/null
++++ b/docs/adr/0002-endpoints-call-application-handlers.md
+@@ -0,0 +1,27 @@
++# 2. Endpoints call application handlers; persistence only through repositories
++
++- Status: Accepted
++- Date: 2026-07-27
++- Deciders: Kasper Nyholt, Wendy Achterberg
++
++## Context
++
++Dispatch rules (zones, capacity, licences, shifts, route lifecycle) must hold whichever way a change arrives: an HTTP
++call from the gateway, a consumed order event, or a future driver app. If endpoints query and change the database
++themselves, each entry point grows its own copy of the rules and the board shows what the database says rather than
++what the domain allows.
++
++## Decision
++
++Four projects with dependencies pointing inward: Domain, Application, Infrastructure, Api. HTTP endpoints validate the
++request shape and call an application handler or a query service (`IDispatchQueries`); they never take the
++`DispatchDbContext` or a repository directly. Application handlers reach persistence only through the repository
++interfaces of the domain and `IUnitOfWork`. Queries for screens go through `IDispatchQueries`, implemented in
++Infrastructure.
++
++## Consequences
++
++- Positive: one place per rule, testable without HTTP; the API can be replaced or doubled (driver app) without
++  touching the rules; reads for screens are explicit and can be optimised in one place.
++- Negative: a small read for a screen needs a query method and a view type instead of a quick LINQ query in the
++  endpoint; more types for simple cases.

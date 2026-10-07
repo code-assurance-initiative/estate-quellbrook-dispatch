@@ -1,0 +1,141 @@
+From 3274671ef51c3642bf4f4f97707185f2cde767a9 Mon Sep 17 00:00:00 2001
+From: Wendy Achterberg <wendy.achterberg@example.invalid>
+Date: Mon, 31 Aug 2026 14:18:06 +0200
+Subject: refactor: name the out-for-delivery event in the past tense;
+ DomainException with one constructor
+
+The routing key stays dispatch.consignment-out-for-delivery.v1; only the type names change.
+---
+ ...V1.cs => ConsignmentSentOutForDeliveryV1.cs} |  2 +-
+ .../Common/DomainException.cs                   | 17 +----------------
+ .../Consignments/Consignment.cs                 |  2 +-
+ .../Consignments/Events.cs                      |  2 +-
+ .../Persistence/DispatchEventMapper.cs          |  6 +++---
+ .../Domain/ConsignmentTests.cs                  | 14 +++++++++++++-
+ 6 files changed, 20 insertions(+), 23 deletions(-)
+ rename src/Quellbrook.Dispatch.Contracts/IntegrationEvents/{ConsignmentOutForDeliveryV1.cs => ConsignmentSentOutForDeliveryV1.cs} (89%)
+
+diff --git a/src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentOutForDeliveryV1.cs b/src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentSentOutForDeliveryV1.cs
+similarity index 89%
+rename from src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentOutForDeliveryV1.cs
+rename to src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentSentOutForDeliveryV1.cs
+index c05c3a5..e9b9c75 100644
+--- a/src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentOutForDeliveryV1.cs
++++ b/src/Quellbrook.Dispatch.Contracts/IntegrationEvents/ConsignmentSentOutForDeliveryV1.cs
+@@ -4,7 +4,7 @@ namespace Quellbrook.Dispatch.Contracts.IntegrationEvents;
+ /// Published when the route carrying a consignment starts (routing key
+ /// <c>dispatch.consignment-out-for-delivery.v1</c>). Schema: contracts/events/consignment-out-for-delivery.v1.schema.json.
+ /// </summary>
+-public sealed record ConsignmentOutForDeliveryV1(
++public sealed record ConsignmentSentOutForDeliveryV1(
+     Guid ConsignmentId,
+     Guid OrderId,
+     Guid RouteId,
+diff --git a/src/Quellbrook.Dispatch.Domain/Common/DomainException.cs b/src/Quellbrook.Dispatch.Domain/Common/DomainException.cs
+index 8434eeb..80f80b1 100644
+--- a/src/Quellbrook.Dispatch.Domain/Common/DomainException.cs
++++ b/src/Quellbrook.Dispatch.Domain/Common/DomainException.cs
+@@ -1,19 +1,4 @@
+ namespace Quellbrook.Dispatch.Domain.Common;
+ 
+ /// <summary>A business rule was broken; the message is safe to show to the caller.</summary>
+-public sealed class DomainException : Exception
+-{
+-    public DomainException()
+-    {
+-    }
+-
+-    public DomainException(string message)
+-        : base(message)
+-    {
+-    }
+-
+-    public DomainException(string message, Exception innerException)
+-        : base(message, innerException)
+-    {
+-    }
+-}
++public sealed class DomainException(string message) : Exception(message);
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs b/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs
+index 3bbe3cb..3c50715 100644
+--- a/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs
+@@ -100,7 +100,7 @@ public sealed class Consignment : AggregateRoot
+         EnsureStatus(ConsignmentStatus.Assigned, "sent out for delivery");
+         Status = ConsignmentStatus.OutForDelivery;
+         OutForDeliveryAt = at;
+-        Raise(new ConsignmentOutForDelivery(Id, OrderId, RouteId ?? throw new InvalidOperationException("Assigned without a route."), at));
++        Raise(new ConsignmentSentOutForDelivery(Id, OrderId, RouteId ?? throw new InvalidOperationException("Assigned without a route."), at));
+     }
+ 
+     public void RecordDelivery(DeliveryProof proof, DateTimeOffset at)
+diff --git a/src/Quellbrook.Dispatch.Domain/Consignments/Events.cs b/src/Quellbrook.Dispatch.Domain/Consignments/Events.cs
+index 05f5b3a..29a04f4 100644
+--- a/src/Quellbrook.Dispatch.Domain/Consignments/Events.cs
++++ b/src/Quellbrook.Dispatch.Domain/Consignments/Events.cs
+@@ -3,7 +3,7 @@ using Quellbrook.Dispatch.Domain.Routes;
+ 
+ namespace Quellbrook.Dispatch.Domain.Consignments;
+ 
+-public sealed record ConsignmentOutForDelivery(
++public sealed record ConsignmentSentOutForDelivery(
+     ConsignmentId ConsignmentId,
+     Guid OrderId,
+     RouteId RouteId,
+diff --git a/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchEventMapper.cs b/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchEventMapper.cs
+index f9976fb..695547a 100644
+--- a/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchEventMapper.cs
++++ b/src/Quellbrook.Dispatch.Infrastructure/Persistence/DispatchEventMapper.cs
+@@ -11,10 +11,10 @@ internal static class DispatchEventMapper
+ {
+     public static IntegrationMessage ToIntegrationMessage(IDomainEvent domainEvent) => domainEvent switch
+     {
+-        ConsignmentOutForDelivery outForDelivery => new IntegrationMessage(
++        ConsignmentSentOutForDelivery outForDelivery => new IntegrationMessage(
+             Guid.CreateVersion7(outForDelivery.OccurredAt),
+-            ConsignmentOutForDeliveryV1.EventType,
+-            new ConsignmentOutForDeliveryV1(
++            ConsignmentSentOutForDeliveryV1.EventType,
++            new ConsignmentSentOutForDeliveryV1(
+                 outForDelivery.ConsignmentId.Value,
+                 outForDelivery.OrderId,
+                 outForDelivery.RouteId.Value,
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs
+index b919565..e613818 100644
+--- a/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs
++++ b/tests/Quellbrook.Dispatch.UnitTests/Domain/ConsignmentTests.cs
+@@ -37,7 +37,7 @@ public sealed class ConsignmentTests
+         Assert.Equal(DeliveryProof.SafePlace, consignment.Proof);
+         Assert.Collection(
+             consignment.DomainEvents,
+-            first => Assert.Equal(routeId, Assert.IsType<ConsignmentOutForDelivery>(first).RouteId),
++            first => Assert.Equal(routeId, Assert.IsType<ConsignmentSentOutForDelivery>(first).RouteId),
+             second => Assert.Equal(DeliveryProof.SafePlace, Assert.IsType<ConsignmentDelivered>(second).Proof));
+     }
+ 
+@@ -77,13 +77,25 @@ public sealed class ConsignmentTests
+     [Theory]
+     [InlineData("DK", "1050", "DK-CPH-C")]
+     [InlineData("DK", "2300", "DK-CPH-S")]
++    [InlineData("DK", "2800", "DK-CPH-N")]
++    [InlineData("DK", "4000", "DK-ZEA")]
++    [InlineData("DK", "5000", "DK-FYN")]
++    [InlineData("DK", "6000", "DK-JUT-S")]
++    [InlineData("DK", "7100", "DK-JUT-C")]
++    [InlineData("DK", "8000", "DK-AAR")]
+     [InlineData("DK", "9000", "DK-JUT-N")]
+     [InlineData("DK", "3700", "DK-OTHER")]
+     [InlineData("SE", "21145", "SE-MAL")]
++    [InlineData("SE", "41101", "SE-GOT")]
++    [InlineData("SE", "11120", "SE-OTHER")]
+     [InlineData("NO", "0150", "NO-OSL")]
++    [InlineData("NO", "5003", "NO-OTHER")]
+     [InlineData("DE", "20095", "DE-HAM")]
++    [InlineData("DE", "24103", "DE-KIE")]
++    [InlineData("DE", "10115", "DE-OTHER")]
+     [InlineData("NL", "1012", "NL-AMS")]
+     [InlineData("NL", "3011", "NL-OTHER")]
++    [InlineData("DK", "8", "DK-OTHER")]
+     public void PostalCodesMapToTheirDeliveryZone(string country, string postalCode, string zone) =>
+         Assert.Equal(zone, DeliveryZones.ZoneFor(country, postalCode));
+ 

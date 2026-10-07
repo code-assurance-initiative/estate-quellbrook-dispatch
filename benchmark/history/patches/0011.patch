@@ -1,0 +1,470 @@
+From ece56ad8d23fd3899cb69b23cacde81e29d6187e Mon Sep 17 00:00:00 2001
+From: Wendy Achterberg <wendy.achterberg@example.invalid>
+Date: Thu, 6 Aug 2026 14:41:12 +0200
+Subject: docs: README, architecture with C4 diagrams, API contract and catalog
+ entry
+
+---
+ README.md              |  89 +++++++++++++++++++
+ SECURITY.md            |  22 +++++
+ catalog-info.yaml      |  33 +++++++
+ contracts/openapi.yaml | 193 +++++++++++++++++++++++++++++++++++++++++
+ docs/architecture.md   |  84 ++++++++++++++++++
+ 5 files changed, 421 insertions(+)
+ create mode 100644 README.md
+ create mode 100644 SECURITY.md
+ create mode 100644 catalog-info.yaml
+ create mode 100644 contracts/openapi.yaml
+ create mode 100644 docs/architecture.md
+
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..eb8ecc7
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,89 @@
++# Quellbrook Dispatch
++
++The dispatch service of Quellbrook Freight's operations platform. When the order service announces an order
++(`orders.order-placed.v1`), dispatch turns it into a **consignment** waiting in the delivery zone of its postal code.
++Dispatchers plan **routes** — one driver and one vehicle in one zone on one day — and assign consignments to them;
++when a driver leaves the depot the route starts and its consignments are out for delivery, and the driver records
++each delivery. Dispatch announces both moments (`dispatch.consignment-out-for-delivery.v1`,
++`dispatch.consignment-delivered.v1`), which the notifier turns into messages for the consignee.
++
++**Owner:** the Fleet team (`#team-fleet`). **System:** Quellbrook operations platform (see `catalog-info.yaml`).
++
++## API
++
++| Method and path | Scope | What it does |
++|---|---|---|
++| `POST /fleet/drivers`, `POST /fleet/vehicles` | `fleet:admin` | Register a driver or a vehicle of a depot |
++| `POST /routes` | `dispatch:write` | Plan a route |
++| `GET /routes?date=` | `dispatch:read` | The dispatch board: every route of a day with its stops |
++| `POST /routes/{id}/start` | `dispatch:write` | The route leaves the depot |
++| `POST /consignments/{id}/assignment` | `dispatch:write` | Assign a waiting consignment to the best route |
++| `POST /consignments/{id}/delivery` | `dispatch:write` | Record a delivery and its proof |
++| `GET /consignments/by-order/{orderId}` | `dispatch:read` | A consignment's status, for the gateway's shipment view |
++| `GET /health/live`, `GET /health/ready` | none | Liveness and readiness probes |
++
++The contract is `contracts/openapi.yaml`. Only the gateway holds a token with these scopes.
++
++## Messages
++
++| Direction | Routing key | Handled by |
++|---|---|---|
++| consumed | `orders.order-placed.v1` | creates the consignment (idempotent: inbox + one consignment per order) |
++| published | `dispatch.consignment-out-for-delivery.v1` | when a route starts, per consignment |
++| published | `dispatch.consignment-delivered.v1` | when a delivery is recorded |
++
++Consumption goes through an inbox and publication through an outbox (ADR 0003); both live in the service's
++database, so a message is processed exactly once and an event is published if and only if its change was committed.
++
++## Build and run
++
++Requires the .NET 10 SDK (`global.json`), a PostgreSQL 16 database and a RabbitMQ broker.
++
++```sh
++dotnet tool restore
++dotnet build Quellbrook.Dispatch.slnx
++export ConnectionStrings__Dispatch="Host=localhost;Database=dispatch;Username=dispatch"
++dotnet ef database update --project src/Quellbrook.Dispatch.Infrastructure
++dotnet run --project src/Quellbrook.Dispatch.Api
++```
++
++## Configuration
++
++| Setting | Meaning |
++|---|---|
++| `ConnectionStrings__Dispatch` | PostgreSQL connection string (a Kubernetes Secret in production) |
++| `Authentication__Authority`, `Authentication__Audience` | the OpenID Connect issuer and this API's audience |
++| `RabbitMq__Uri`, `RabbitMq__UserName`, `RabbitMq__Password`, `RabbitMq__Exchange` | the broker; credentials from a Secret |
++| `Outbox__PollInterval`, `Outbox__BatchSize`, `Outbox__Retention` | outbox relay tuning |
++| `OTEL_EXPORTER_OTLP_ENDPOINT` | where traces, metrics and logs are exported, when set |
++
++## Testing
++
++```sh
++dotnet test Quellbrook.Dispatch.slnx
++```
++
++`tests/Quellbrook.Dispatch.UnitTests` covers the consignment and route rules, the delivery zones, the assignment
++policy, the handlers (over in-memory SQLite), the inbox, the consumer's acknowledgement rules, the outbox relay and the
++broker clients. `tests/Quellbrook.Dispatch.IntegrationTests` hosts the real API with `WebApplicationFactory` over
++in-memory SQLite and an in-process token issuer; the consumer and the relay do not run there.
++
++## Architecture
++
++Domain, application, infrastructure and API projects with dependencies pointing inward; endpoints call application
++handlers only (ADR 0002). See [docs/architecture.md](docs/architecture.md) and [docs/adr](docs/adr).
++
++## Deployment
++
++A published GitHub release builds the image and the migrations bundle (`.github/workflows/release.yml`); the manual
++`deploy.yml` workflow migrates the database and rolls the image out to the `quellbrook-dispatch` namespace
++(`deploy/k8s/`), rolling back when the new pods do not become ready.
++
++## Contributing
++
++Open a pull request against `main`. CI must be green and CodeQL must report no new alerts. Schema changes come with
++an EF Core migration. Record user-visible changes in `CHANGELOG.md`.
++
++## Licence
++
++MIT; see [LICENSE](LICENSE).
+diff --git a/SECURITY.md b/SECURITY.md
+new file mode 100644
+index 0000000..9dc4bfb
+--- /dev/null
++++ b/SECURITY.md
+@@ -0,0 +1,22 @@
++# Security policy
++
++## Reporting a vulnerability
++
++Please report suspected vulnerabilities privately through GitHub's
++[private vulnerability reporting](https://github.com/code-assurance-initiative/estate-quellbrook-dispatch/security/advisories/new)
++for this repository. Do not open a public issue.
++
++Include what you found, how to reproduce it, and the impact you expect. We acknowledge reports within three working
++days and aim to publish a fix or a mitigation within 30 days of confirming the issue. We credit reporters in the
++advisory unless they ask us not to.
++
++## Supported versions
++
++Only the latest release is supported.
++
++## Scope
++
++In scope: the dispatch service and the build, release and deployment configuration in this repository. Out of scope:
++the identity provider, the message broker and the platform's shared infrastructure (report those to the platform
++team through the same channel), and denial of service through request volume (the service is reachable only through
++the gateway, which applies rate limits).
+diff --git a/catalog-info.yaml b/catalog-info.yaml
+new file mode 100644
+index 0000000..c0c3b9d
+--- /dev/null
++++ b/catalog-info.yaml
+@@ -0,0 +1,33 @@
++apiVersion: backstage.io/v1alpha1
++kind: Component
++metadata:
++  name: quellbrook-dispatch
++  description: Dispatch service — consignments, routes, drivers and vehicles; consumes order events, publishes dispatch events.
++  annotations:
++    github.com/project-slug: code-assurance-initiative/estate-quellbrook-dispatch
++  tags: [dotnet, postgres, rabbitmq]
++spec:
++  type: service
++  lifecycle: production
++  owner: group:fleet
++  system: quellbrook-operations
++  providesApis:
++    - quellbrook-dispatch-api
++  consumesApis:
++    - quellbrook-orders-events
++  dependsOn:
++    - resource:quellbrook-dispatch-db
++    - resource:quellbrook-event-broker
++---
++apiVersion: backstage.io/v1alpha1
++kind: API
++metadata:
++  name: quellbrook-dispatch-api
++  description: HTTP API of the dispatch service, consumed by the gateway.
++spec:
++  type: openapi
++  lifecycle: production
++  owner: group:fleet
++  system: quellbrook-operations
++  definition:
++    $text: ./contracts/openapi.yaml
+diff --git a/contracts/openapi.yaml b/contracts/openapi.yaml
+new file mode 100644
+index 0000000..bce73e4
+--- /dev/null
++++ b/contracts/openapi.yaml
+@@ -0,0 +1,193 @@
++openapi: 3.1.0
++info:
++  title: Quellbrook Dispatch API
++  version: 0.1.0
++  description: Dispatch service of the Quellbrook operations platform. Called by the API gateway only.
++servers:
++  - url: http://quellbrook-dispatch.quellbrook-dispatch.svc.cluster.local
++security:
++  - bearer: []
++paths:
++  /fleet/drivers:
++    post:
++      summary: Register a driver
++      security: [{ bearer: [fleet:admin] }]
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              type: object
++              required: [displayName, depot, licence, shiftStart, shiftEnd]
++              properties:
++                displayName: { type: string, maxLength: 40 }
++                depot: { type: string, maxLength: 16 }
++                licence: { type: string, enum: [b, c1, c] }
++                shiftStart: { type: string, format: time }
++                shiftEnd: { type: string, format: time }
++      responses:
++        '201': { description: Registered. }
++        '400': { $ref: '#/components/responses/Problem' }
++        '422': { $ref: '#/components/responses/Problem' }
++  /fleet/vehicles:
++    post:
++      summary: Register a vehicle
++      security: [{ bearer: [fleet:admin] }]
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              type: object
++              required: [registration, depot, kind, capacityGrams]
++              properties:
++                registration: { type: string, maxLength: 16 }
++                depot: { type: string, maxLength: 16 }
++                kind: { type: string, enum: [van, rigid] }
++                capacityGrams: { type: integer, minimum: 1, maximum: 7500000 }
++      responses:
++        '201': { description: Registered. }
++        '400': { $ref: '#/components/responses/Problem' }
++  /routes:
++    get:
++      summary: The dispatch board of a day
++      security: [{ bearer: [dispatch:read] }]
++      parameters:
++        - { name: date, in: query, required: true, schema: { type: string, format: date } }
++      responses:
++        '200':
++          description: Every route of the day with its vehicle, driver and stops.
++          content:
++            application/json:
++              schema:
++                type: array
++                items: { $ref: '#/components/schemas/RouteBoardEntry' }
++    post:
++      summary: Plan a route
++      security: [{ bearer: [dispatch:write] }]
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              type: object
++              required: [depot, zone, serviceDate, driverId, vehicleId]
++              properties:
++                depot: { type: string }
++                zone: { type: string }
++                serviceDate: { type: string, format: date }
++                driverId: { type: string, format: uuid }
++                vehicleId: { type: string, format: uuid }
++                express: { type: boolean, default: false }
++      responses:
++        '201': { description: Planned. }
++        '400': { $ref: '#/components/responses/Problem' }
++        '404': { $ref: '#/components/responses/Problem' }
++        '422': { $ref: '#/components/responses/Problem' }
++  /routes/{id}/start:
++    post:
++      summary: The route leaves the depot; its consignments are out for delivery
++      security: [{ bearer: [dispatch:write] }]
++      parameters:
++        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
++      responses:
++        '204': { description: Started. }
++        '404': { $ref: '#/components/responses/Problem' }
++        '409': { $ref: '#/components/responses/Problem' }
++  /consignments/{id}/assignment:
++    post:
++      summary: Assign a waiting consignment to the best route of a day
++      security: [{ bearer: [dispatch:write] }]
++      parameters:
++        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              type: object
++              required: [serviceDate]
++              properties:
++                serviceDate: { type: string, format: date }
++      responses:
++        '200': { description: Assigned; the body names the route. }
++        '404': { $ref: '#/components/responses/Problem' }
++        '409': { $ref: '#/components/responses/Problem' }
++  /consignments/{id}/delivery:
++    post:
++      summary: Record a delivery
++      security: [{ bearer: [dispatch:write] }]
++      parameters:
++        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              type: object
++              required: [proof]
++              properties:
++                proof: { type: string, enum: [signature, photo, safePlace] }
++      responses:
++        '204': { description: Recorded. }
++        '404': { $ref: '#/components/responses/Problem' }
++        '409': { $ref: '#/components/responses/Problem' }
++  /consignments/by-order/{orderId}:
++    get:
++      summary: The consignment of an order
++      security: [{ bearer: [dispatch:read] }]
++      parameters:
++        - { name: orderId, in: path, required: true, schema: { type: string, format: uuid } }
++      responses:
++        '200':
++          description: Its status.
++          content:
++            application/json:
++              schema: { $ref: '#/components/schemas/Consignment' }
++        '404': { description: No consignment for this order (yet). }
++components:
++  securitySchemes:
++    bearer: { type: http, scheme: bearer, bearerFormat: JWT }
++  responses:
++    Problem:
++      description: RFC 9457 problem details.
++      content:
++        application/problem+json:
++          schema: { type: object }
++  schemas:
++    Consignment:
++      type: object
++      properties:
++        consignmentId: { type: string, format: uuid }
++        orderId: { type: string, format: uuid }
++        serviceLevel: { type: string }
++        zone: { type: string }
++        status: { type: string, enum: [AwaitingRoute, Assigned, OutForDelivery, Delivered, Cancelled] }
++        routeId: { type: [string, 'null'], format: uuid }
++        outForDeliveryAt: { type: [string, 'null'], format: date-time }
++        deliveredAt: { type: [string, 'null'], format: date-time }
++        proof: { type: [string, 'null'] }
++    RouteBoardEntry:
++      type: object
++      properties:
++        routeId: { type: string, format: uuid }
++        depot: { type: string }
++        zone: { type: string }
++        express: { type: boolean }
++        status: { type: string }
++        driverName: { type: string }
++        vehicleRegistration: { type: string }
++        vehicleKind: { type: string }
++        capacityGrams: { type: integer }
++        loadGrams: { type: integer }
++        stops:
++          type: array
++          items:
++            type: object
++            properties:
++              sequence: { type: integer }
++              consignmentId: { type: string, format: uuid }
++              orderId: { type: string, format: uuid }
++              postalCode: { type: string }
++              weightGrams: { type: integer }
++              status: { type: string }
+diff --git a/docs/architecture.md b/docs/architecture.md
+new file mode 100644
+index 0000000..d0aa580
+--- /dev/null
++++ b/docs/architecture.md
+@@ -0,0 +1,84 @@
++# Architecture — dispatch service
++
++## Context
++
++Dispatch is one of five parts of the Quellbrook operations platform. It learns about orders from the order
++service's events, is driven by dispatchers through the operator console and the gateway, and tells the notifier when
++parcels are on their way and delivered. Traffic between services inside the cluster goes through the Linkerd service
++mesh (mutual TLS); the service listens on plain HTTP inside its pod and is reachable only from the gateway's namespace.
++
++```mermaid
++C4Context
++  title System context — Quellbrook operations platform
++  Person(dispatcher, "Dispatcher", "Plans routes and assigns consignments")
++  Person(driver, "Driver", "Delivers the parcels")
++  System_Boundary(platform, "Quellbrook operations platform") {
++    System(web, "Operator console", "estate-quellbrook-web")
++    System(gateway, "API gateway / BFF", "estate-quellbrook-gateway")
++    System(orders, "Order service", "estate-quellbrook-orders")
++    System(dispatch, "Dispatch service", "this repository")
++    System(notifier, "Notifier", "estate-quellbrook-notifier")
++  }
++  Rel(dispatcher, web, "Uses", "HTTPS")
++  Rel(web, gateway, "Calls /api", "HTTPS/JSON")
++  Rel(gateway, dispatch, "Board, assignment, routes", "HTTP/JSON, mesh mTLS")
++  Rel(orders, dispatch, "orders.order-placed.v1", "RabbitMQ")
++  Rel(dispatch, notifier, "dispatch.* events", "RabbitMQ")
++  Rel(driver, gateway, "Records deliveries (handheld)", "HTTPS")
++```
++
++## Containers
++
++```mermaid
++C4Container
++  title Containers — dispatch service
++  System_Ext(gateway, "API gateway / BFF", "estate-quellbrook-gateway")
++  Container_Boundary(service, "Dispatch service") {
++    Container(api, "Dispatch API", "ASP.NET Core, .NET 10", "Fleet, routes, assignment, deliveries; order-event consumer; outbox relay")
++    ContainerDb(db, "Dispatch database", "PostgreSQL 16", "consignments, routes, route_stops, drivers, vehicles, inbox_messages, outbox_messages")
++  }
++  ContainerQueue(broker, "Event broker", "RabbitMQ", "topic exchange quellbrook.events; queue dispatch.order-events")
++  System_Ext(idp, "Identity provider", "OpenID Connect")
++  Rel(gateway, api, "Calls", "HTTP/JSON over mesh mTLS, bearer token with dispatch:* / fleet:admin")
++  Rel(api, db, "Reads and writes", "EF Core / Npgsql")
++  Rel(broker, api, "Delivers orders.order-placed.v1", "AMQPS")
++  Rel(api, broker, "Publishes dispatch.*.v1 from the outbox", "AMQPS")
++  Rel(api, idp, "Fetches token signing keys", "HTTPS")
++```
++
++## Inside the service
++
++| Project | Responsibility | Depends on |
++|---|---|---|
++| `Quellbrook.Dispatch.Domain` | consignments, routes, drivers, vehicles, delivery zones, assignment policy | nothing |
++| `Quellbrook.Dispatch.Contracts` | the published integration-event contracts | nothing |
++| `Quellbrook.Dispatch.Application` | command handlers, the consumed-message handlers, query interfaces | Domain, Contracts |
++| `Quellbrook.Dispatch.Infrastructure` | EF Core persistence and migrations, inbox, outbox and relay, RabbitMQ consumer and publisher | Application |
++| `Quellbrook.Dispatch.Api` | minimal-API endpoints, authentication and authorization, hosting | Infrastructure |
++
++Endpoints call application handlers and `IDispatchQueries` only (ADR 0002). A consumed message runs through
++`InboxProcessor`: its id is recorded in the same transaction as the handler's changes (ADR 0003).
++
++```mermaid
++sequenceDiagram
++  participant B as RabbitMQ
++  participant C as OrderEventsConsumer
++  participant I as InboxProcessor
++  participant H as OrderPlacedHandler
++  participant D as PostgreSQL
++  B->>C: orders.order-placed.v1 (message-id)
++  C->>I: process(message-id, body)
++  I->>D: seen this id? (no)
++  I->>H: handle
++  H->>D: one consignment per order
++  I->>D: INSERT inbox row + changes, COMMIT
++  C->>B: ack
++```
++
++## Message contracts
++
++| Routing key | Payload | Direction |
++|---|---|---|
++| `orders.order-placed.v1` | order id, service level, consignee address (postal code, country), parcel weights — dispatch's own copy of the fields it uses (`OrderPlacedMessage`) | consumed |
++| `dispatch.consignment-out-for-delivery.v1` | consignment id, order id, route id, time | published |
++| `dispatch.consignment-delivered.v1` | consignment id, order id, proof (signature, photo, safe place), time | published |

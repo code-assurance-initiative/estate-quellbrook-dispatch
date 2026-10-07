@@ -1,0 +1,35 @@
+From 0fc519a71da4a8ea6bdc2b30fb12354a9f0e3224 Mon Sep 17 00:00:00 2001
+From: Wendy Achterberg <wendy.achterberg@example.invalid>
+Date: Mon, 24 Aug 2026 10:03:26 +0200
+Subject: test: route capacity test on a fixed date, enabled again
+
+The test planned the route for the local date and asked for the UTC date; between midnight and 02:00 CEST they differ. FLEET-212.
+---
+ .../Domain/StandardAssignmentPolicyTests.cs           | 11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/tests/Quellbrook.Dispatch.UnitTests/Domain/StandardAssignmentPolicyTests.cs b/tests/Quellbrook.Dispatch.UnitTests/Domain/StandardAssignmentPolicyTests.cs
+index 7b633b2..dab7237 100644
+--- a/tests/Quellbrook.Dispatch.UnitTests/Domain/StandardAssignmentPolicyTests.cs
++++ b/tests/Quellbrook.Dispatch.UnitTests/Domain/StandardAssignmentPolicyTests.cs
+@@ -64,15 +64,14 @@ public sealed class StandardAssignmentPolicyTests
+         Assert.Null(_policy.Choose(DispatchData.Consignment(), [downgraded], DispatchData.Today).RouteId);
+     }
+ 
+-    [Fact(Skip = "Fails on CI around midnight; FLEET-212")]
+-    public void ARouteForTodayTakesConsignmentsUntilItsVehicleIsFull()
++    [Fact]
++    public void ARouteTakesConsignmentsUntilItsVehicleIsFull()
+     {
+-        var today = DateOnly.FromDateTime(DateTime.Now);
+-        var candidate = DispatchData.Candidate(vehicle: DispatchData.Van(capacityGrams: 5_000), date: today);
++        var candidate = DispatchData.Candidate(vehicle: DispatchData.Van(capacityGrams: 5_000), date: DispatchData.Today);
+         var first = DispatchData.Consignment(weights: 3_000);
+ 
+-        Assert.Equal(candidate.Route.Id, _policy.Choose(first, [candidate], DateOnly.FromDateTime(DateTime.UtcNow)).RouteId);
++        Assert.Equal(candidate.Route.Id, _policy.Choose(first, [candidate], DispatchData.Today).RouteId);
+         candidate.Route.AddStop(first);
+-        Assert.Null(_policy.Choose(DispatchData.Consignment(weights: 3_000), [candidate], DateOnly.FromDateTime(DateTime.UtcNow)).RouteId);
++        Assert.Null(_policy.Choose(DispatchData.Consignment(weights: 3_000), [candidate], DispatchData.Today).RouteId);
+     }
+ }

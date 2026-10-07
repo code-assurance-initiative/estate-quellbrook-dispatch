@@ -1,0 +1,38 @@
+From f03b1a53d07a822b45929b3c631b4d4dcb94cb59 Mon Sep 17 00:00:00 2001
+From: Wendy Achterberg <wendy.achterberg@example.invalid>
+Date: Wed, 2 Sep 2026 11:12:58 +0200
+Subject: docs: express rules in the README
+
+---
+ README.md | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/README.md b/README.md
+index cbc5b12..5abf851 100644
+--- a/README.md
++++ b/README.md
+@@ -24,7 +24,8 @@ each delivery. Dispatch announces both moments (`dispatch.consignment-out-for-de
+ | `GET /drivers/available?date=&depot=` | `dispatch:read` | Drivers and vehicles of a depot without a route on a day |
+ | `GET /health/live`, `GET /health/ready` | none | Liveness and readiness probes |
+ 
+-The contract is `contracts/openapi.yaml`. Only the gateway holds a token with these scopes.
++The contract is `contracts/openapi.yaml`; the event schemas are in `contracts/events/` and `contracts/asyncapi.yaml`,
++the consumed order schemas pinned in `contracts/consumed/orders/`. Only the gateway holds a token with these scopes.
+ 
+ ## Messages
+ 
+@@ -38,6 +39,14 @@ The contract is `contracts/openapi.yaml`. Only the gateway holds a token with th
+ Consumption goes through an inbox and publication through an outbox (ADR 0003); both live in the service's
+ database, so a message is processed exactly once and an event is published if and only if its change was committed.
+ 
++## Express
++
++Express consignments follow ADR 0004: before the 14:00 cut-off (depot time, working days) they go on a route of the
++same day — an express run first, a standard route that has not left and keeps a 10 % buffer otherwise; an adjacent
++zone's route may take a small one; heavy ones need a rigid vehicle and a C1 driver; a driver due their break takes no
++more. The rules are `ExpressAssignmentPolicy` with `ExpressCutOff` and `DriverHours` in
++`src/Quellbrook.Dispatch.Domain/Assignment`.
++
+ ## Build and run
+ 
+ Requires the .NET 10 SDK (`global.json`), a PostgreSQL 16 database and a RabbitMQ broker.
