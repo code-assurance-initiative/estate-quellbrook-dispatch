@@ -118,7 +118,17 @@ public sealed class InboxAndConsumerTests : IDisposable
         var consumer = new OrderEventsConsumer(connections, Inbox(), Options.Create(new RabbitMqOptions { Exchange = "quellbrook.events" }),
             NullLogger<OrderEventsConsumer>.Instance);
 
+        var consuming = new TaskCompletionSource();
+        channel.BasicConsumeAsync(Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<bool>(),
+                Arg.Any<IDictionary<string, object?>?>(), Arg.Any<IAsyncBasicConsumer>(), Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                consuming.TrySetResult();
+                return Task.FromResult("consumer-tag");
+            });
+
         await consumer.StartAsync(TestContext.Current.CancellationToken);
+        await consuming.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         await consumer.StopAsync(TestContext.Current.CancellationToken);
 
         await channel.Received(1).QueueDeclareAsync(

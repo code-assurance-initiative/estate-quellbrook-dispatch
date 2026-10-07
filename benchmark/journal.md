@@ -85,3 +85,19 @@
 - `benchmark/history/`: 33 patches, `build-history.sh` (verified into a fresh directory: HEAD and three tags match),
   README with the story notes marking the regression and the partial repair commit by commit.
 - Key changes: traps TRP-014, TRP-015; band `architecture-rules-unenforced`.
+
+## 2026-10-07 — scan iteration 3 and a fix forward
+
+- Contained pass at `52c3a16` (pushed): identical results to iteration 2. Model-judged pass: as iteration 2 except the
+  two M4 rows did not recur (model non-determinism); D20 on ADR 0001 recurred (TRP-015 caught); D25 again found no
+  violation (DSP-004 false negative).
+- **Sprint trend, measured** (contained scans of clones at each release tag): D1 100 → 91 → 96 (`Choose` cyclomatic
+  — → 32 → 20), D2 100 → 88 → 93 (cognitive — → 44 → 26), D15 100 → 94 → 97 (the hotspot appears in sprint 2), D4
+  100 → 99 → 99 (the copied block appears in sprint 2 and stays), low-coverage rows 3 → 7 → 0. As the story says:
+  worse at v0.2.0, better at v0.3.0, still worse than v0.1.0 on complexity and duplication. (D8's score saturates at
+  100 in all three; its per-file rows carry the coverage story.)
+- **Repository defect found while building the notifier, fixed forward here:** the consumer setup test (added in
+  sprint 3) stopped the `BackgroundService` right after starting it; since .NET 10 runs `ExecuteAsync` on the thread
+  pool, the stop can cancel the consumer before it declares its queue, so the test can fail intermittently. The
+  scripted history is already published, so the fix is a maintenance commit after it: the test now waits until the
+  consumer has started consuming. No scanner reported it.
