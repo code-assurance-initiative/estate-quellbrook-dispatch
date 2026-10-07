@@ -101,3 +101,16 @@
   pool, the stop can cancel the consumer before it declares its queue, so the test can fail intermittently. The
   scripted history is already published, so the fix is a maintenance commit after it: the test now waits until the
   consumer has started consuming. No scanner reported it.
+
+## 2026-10-07 — scan iteration 4 (final) and freeze
+
+- Contained pass at `c1a3995`: the same 30 results as iterations 2 and 3 (the fix forward changed a test only).
+  Model-judged host pass: D19 90, D20 80, D21 100, D22 100, D24 90, D25 100, M4 100; D20 on ADR 0001 recurred
+  (TRP-015 caught); the M4 rows of iteration 2 did not recur.
+- Final outcome: 3 of 5 plants found on their lines (DSP-001 D1, DSP-002 D2, DSP-005 D15); DSP-003 reported five
+  lines early (file-level hit); DSP-004 missed by D25. Traps caught: TRP-002, -004, -007, -009, -010, -011, -012,
+  -013, -014 (contained) and TRP-015 (model pass). Score bands out, kept as set before the first scan:
+  `architecture-rules-unenforced` (D7 100), `runtime-threat-detection-and-admission` (D42 80), `adr-conformance`
+  (D25 100) and `data-retention-policy` (C4 100, no retention exists here).
+- Converged: every result is judged; the repository holds its five plants, fifteen traps and recorded noise only.
+  Frozen as v1.0.0 with this entry.
