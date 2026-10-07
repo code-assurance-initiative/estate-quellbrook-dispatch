@@ -56,27 +56,33 @@ v0.1.0**, **better at v0.3.0 than at v0.2.0**, and **still worse at v0.3.0 than 
 
 | Id | Concept | Site | Why |
 |---|---|---|---|
-| DSP-001 | `high-cyclomatic-complexity` | `src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs:20` | ExpressAssignmentPolicy.Choose decides same-day express assignment in one method: cut-off, zone and adjacent zones, vehicle kind for heavy parcels, licence category, remaining capacity with a buffer, driver hours and break rules, and a tie-break. It grew to roughly thirty decision points in sprint 2 and sprint 3's refactoring brought it down only part of the way; it is still well above 15. |
-| DSP-002 | `high-cognitive-complexity` | `src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs:20` | The same method nests its rules three and four levels deep inside the candidate-route loop (continue/break inside nested conditions): hard to read and to change safely. |
-| DSP-003 | `duplicated-code` | `src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs:60-75` | The capacity and driver-shift checks were copied from StandardAssignmentPolicy into the express policy in sprint 2 (same statements, same order, renamed nothing) and never extracted; a fix to one copy (sprint 3's end-of-shift rounding) has to be made twice. Keyed on the copy; the original block in StandardAssignmentPolicy.cs is the other half of the same defect and carries no clean label for this concept. |
+| DSP-001 | `high-cyclomatic-complexity` | `src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs:16` | ExpressAssignmentPolicy.Choose decides same-day express assignment in one method: service level, cut-off, route status and date, zone and vehicle fit, remaining capacity, driver activity, shift length and licence, driver hours, the capacity buffer and a scored tie-break. It grew to about thirty decision points in sprint 2; sprint 3's refactoring moved the cut-off, driver hours, zone and vehicle rules out, which brought it to about twenty: still above 15. |
+| DSP-002 | `high-cognitive-complexity` | `src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs:16` | The same method nests its rules three and four levels deep inside the candidate-route loop (continue/break inside nested conditions): hard to read and to change safely. |
+| DSP-003 | `duplicated-code` | `src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs:48-63` | The capacity, driver-activity, shift-length and licence checks were copied from StandardAssignmentPolicy into the express policy in sprint 2 (the same sixteen lines, the same order, nothing renamed) and were not extracted in sprint 3's refactoring: every change to how a route's capacity or a driver's eligibility is judged now has to be made twice. Keyed on the copy; the original block in StandardAssignmentPolicy.cs (lines 28-43) is the other half of the same defect and carries no clean label for this concept. |
 | DSP-004 | `adr-conformance` | `docs/adr/0002-endpoints-call-application-handlers.md` | ADR 0002 (Accepted) decides that HTTP endpoints only call application handlers and that persistence is reached only through repositories. DriverEndpoints.cs (added in sprint 2 for the dispatch board) injects DispatchDbContext and queries drivers, vehicles and routes directly in the endpoint. Keyed on the ADR whose decision is broken; a result at the endpoint names the same violation. |
-| DSP-005 | `churn-complexity-hotspot` | `src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs` | ExpressAssignmentPolicy.cs is the most frequently changed production file of the last ninety days (created and then fixed and refactored repeatedly across sprints 2 and 3, by three authors) and the most complex: change keeps landing on the riskiest code. Keyed on the file. |
+| DSP-005 | `churn-complexity-hotspot` | `src/Quellbrook.Dispatch.Domain/Assignment/ExpressAssignmentPolicy.cs` | ExpressAssignmentPolicy.cs is the most frequently changed production file of the last ninety days (created in sprint 2 and changed in six commits by two authors across sprints 2 and 3) and the most complex: change keeps landing on the riskiest code. Keyed on the file. |
 
 ## Traps (`must-not-fire`)
 
 | Id | Concept | Site | Why |
 |---|---|---|---|
-| TRP-001 | `high-cyclomatic-complexity` | `src/Quellbrook.Dispatch.Domain/Consignments/DeliveryZones.cs:10` | DeliveryZones.ZoneFor maps a postcode district to a delivery zone with one flat switch expression of about twenty arms. Each arm is a table row, not a decision path a reader must follow; a lookup table is the clearest way to write it. |
-| TRP-002 | `non-idempotent-message-handler` | `src/Quellbrook.Dispatch.Application/Intake/OrderPlacedHandler.cs:20-40` | The OrderPlaced handler is idempotent twice over: the consumer records each message id in an inbox table in the same transaction as the handler's changes and skips a message id it has seen, and the handler itself returns early when a consignment for the order already exists. |
-| TRP-003 | `dual-write-without-outbox` | `src/Quellbrook.Dispatch.Infrastructure/Messaging/OutboxRelay.cs:40-70` | The outbox relay publishes stored messages and then marks them dispatched; it is the relay of a transactional outbox, not a dual write. |
-| TRP-004 | `event-not-named-in-past-tense` | `src/Quellbrook.Dispatch.Api/Contracts/AssignConsignmentRequest.cs:5` | AssignConsignmentRequest is an HTTP request body, not an event. |
-| TRP-005 | `hardcoded-credential` | `src/Quellbrook.Dispatch.Api/appsettings.json:10` | The broker address in appsettings.json is an amqps:// URI with host, port and virtual host only; the user name and password come from a Kubernetes Secret. |
-| TRP-006 | `hardcoded-credential` | `deploy/k8s/deployment.yaml:50-60` | Database and broker credentials are read from Kubernetes Secrets (secretKeyRef) materialised by an ExternalSecret. |
+| TRP-001 | `high-cyclomatic-complexity` | `src/Quellbrook.Dispatch.Domain/Consignments/DeliveryZones.cs:14` | DeliveryZones.ZoneFor maps a country and postal district to a delivery zone with one flat switch expression of twenty arms. Each arm is a table row, not a decision path a reader must follow; a lookup table is the clearest way to write it. |
+| TRP-002 | `non-idempotent-message-handler` | `src/Quellbrook.Dispatch.Application/Intake/OrderPlacedHandler.cs:14-35` | The OrderPlaced handler is idempotent twice over: the consumer records each message id in an inbox table in the same transaction as the handler's changes and skips a message id it has seen, and the handler itself returns early when a consignment for the order already exists. |
+| TRP-003 | `dual-write-without-outbox` | `src/Quellbrook.Dispatch.Infrastructure/Messaging/OutboxRelay.cs:23-56` | The outbox relay publishes stored messages and then marks them dispatched; it is the relay of a transactional outbox, not a dual write. |
+| TRP-004 | `event-not-named-in-past-tense` | `src/Quellbrook.Dispatch.Api/Contracts/Requests.cs:54` | AssignConsignmentRequest is an HTTP request body, not an event. |
+| TRP-005 | `hardcoded-credential` | `src/Quellbrook.Dispatch.Api/appsettings.json:15` | The broker address in appsettings.json is an amqps:// URI with host, port and virtual host only; the user name and password come from a Kubernetes Secret. |
+| TRP-006 | `hardcoded-credential` | `deploy/k8s/deployment.yaml:56-70` | Database and broker credentials are read from Kubernetes Secrets (secretKeyRef) materialised by an ExternalSecret. |
 | TRP-007 | `suppressed-diagnostic` | `.editorconfig:36-37` | CA2007 is switched off at the root for tests with its reason on the line above, and src/.editorconfig switches it back on for production code. |
+| TRP-009 | `primitive-entity-identifier` | `src/Quellbrook.Dispatch.Domain/Consignments/Consignment.cs:38` | Consignment.OrderId holds the order service's identifier: a reference into another service, carried as the Guid that service publishes, not an identity of anything dispatch owns. Dispatch's own entities have strongly typed ids (ConsignmentId, RouteId, DriverId, VehicleId). |
+| TRP-010 | `solution-structure` | `(repository)` | Quellbrook.Dispatch.Contracts is small on purpose: only the published event contracts, versioned on their own and unable to reference the domain. Repository-level: a scanner reports the solution's shape without a site. |
+| TRP-011 | `missing-image-healthcheck` | `src/Quellbrook.Dispatch.Api/Dockerfile` | The image runs only on Kubernetes, which ignores a Dockerfile HEALTHCHECK; the probes are in deploy/k8s/deployment.yaml. |
+| TRP-012 | `compiled-code-size` | `src/Quellbrook.Dispatch.Domain/Consignments/DeliveryZones.cs:10-14` | DeliveryZones.ZoneFor compiles to a large IL body because its switch expression is a twenty-row lookup table of postal districts; the size measures the table, not logic. |
+| TRP-013 | `integration-event-leaks-domain-type` | `src/Quellbrook.Dispatch.Api/Contracts/Requests.cs:6` | RegisterDriverRequest is the HTTP request body of POST /fleet/drivers, deserialised inside the dispatch service itself, not an integration event another service consumes; using the domain's own LicenceCategory enum for it couples nothing across a boundary. (The same holds for the vehicle and delivery requests in this file.) |
+| TRP-008 | `cleartext-transmission` | `src/Quellbrook.Dispatch.Api/appsettings.Development.json:9` | appsettings.Development.json points the broker at amqp://localhost for a developer's local RabbitMQ container; production configuration uses amqps. Plain AMQP to the loopback interface crosses no network. |
 
 ## Certified clean
 
-Every tracked file will carry a `clean` entry, generated from the file list once the code exists: files without a label clean for every concept, labelled files for every finding concept except the labelled ones.
+157 `clean` entries, one per tracked file: files without a label are certified clean for every concept (`"*"`); a file that carries a plant or a trap is certified clean for every finding concept except the labelled ones and the concepts a result of those labels would restate.
 
 ## Not applicable
 
@@ -94,6 +100,7 @@ Every tracked file will carry a `clean` entry, generated from the file list once
 - `sensitive-data-in-browser-storage` — No browser code.
 - `nondeterministic-event-fold` — The service stores state, not events.
 - `mutable-persisted-event` — The service stores state, not events: there is no event store.
+- `https-enforcement` — An internal API reachable only from the gateway's namespace, behind the cluster's service mesh, which encrypts and authenticates every connection with mutual TLS; the pod listens on plain HTTP to its sidecar by design. HTTPS redirection would break the gateway's calls and HSTS is a browser mechanism.
 
 ## Score bands
 
@@ -131,11 +138,10 @@ Bands were set from the intent of the code, before any scan, and are wide where 
 | BND-028 | `inconsistent-naming` | 60–100 | Model-judged. Consistent domain vocabulary. Wide band. |
 | BND-029 | `low-value-comments` | 60–100 | Model-judged. Comments explain why, not what. Wide band. |
 | BND-030 | `internal-api-inconsistency` | 60–100 | Model-judged. Endpoints and handlers follow one shape. Wide band. |
-| BND-031 | `security-response-headers` | 80–100 | Security headers on every response; HSTS. |
-| BND-032 | `https-enforcement` | 80–100 | UseHttpsRedirection and UseHsts outside development. |
-| BND-033 | `authorization-enforcement` | 70–100 | Every endpoint but health requires a named scope policy. |
-| BND-034 | `inbound-input-validation` | 60–100 | Request bodies validated before they reach the domain. |
-| BND-035 | `versioned-schema-migrations` | 80–100 | EF Core migrations, one per schema change. |
-| BND-036 | `data-retention-policy` | 0–60 | Consignments keep a delivery postcode district and no names or contact data; no retention job. |
-| BND-037 | `audit-trail` | 10–80 | Assignments record the operator; no general audit log. |
-| BND-038 | `data-subject-rights` | 0–60 | The service holds no direct identifiers of people other than drivers' display names. |
+| BND-031 | `security-response-headers` | 70–100 | CSP, X-Content-Type-Options, frame, referrer and resource policy on every response. |
+| BND-032 | `authorization-enforcement` | 70–100 | Every endpoint but health requires a named scope policy. |
+| BND-033 | `inbound-input-validation` | 60–100 | Request bodies validated before they reach the domain. |
+| BND-034 | `versioned-schema-migrations` | 80–100 | EF Core migrations, one per schema change. |
+| BND-035 | `data-retention-policy` | 0–60 | Consignments keep a delivery postcode district and no names or contact data; no retention job. |
+| BND-036 | `audit-trail` | 0–70 | No record of who planned, assigned or delivered beyond timestamps. |
+| BND-037 | `data-subject-rights` | 0–60 | The service holds no direct identifiers of people other than drivers' display names. |

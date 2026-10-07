@@ -14,3 +14,50 @@
   key-first commit, so the key precedes every line of code in the commit graph; the scripted commits carry fictional
   authors and dates in 2026-07..2026-09, earlier than this commit's real date. Nothing is force-pushed.
 - Validated with `python3 -m cai_bench validate`: OK.
+
+## 2026-10-07 — implementation and scripted history (local, not pushed)
+
+- Written forward, sprint by sprint; each release tag's tree was built (warnings as errors) and tested before its
+  commits were made. 33 scripted commits, tags `v0.1.0` (61 tests), `v0.2.0` (60 + 1 skipped + 6), `v0.3.0` (73 + 7).
+- The regression, as built: sprint 2 adds `ExpressAssignmentPolicy` in four commits by the contractor (one method
+  growing to about thirty decision points, the capacity/shift/licence block copied from the standard policy), a
+  drivers-available endpoint that queries `DispatchDbContext` directly against ADR 0002, and skips the route capacity
+  test that depended on the local and UTC dates (it was written in sprint 1 with `DateTime.Now`). Sprint 3 fixes and
+  re-enables that test, extracts the cut-off, driver hours, zone and vehicle rules (about twenty decision points left),
+  adds eleven express tests and an integration test for the endpoint; the copied block and the bypass stay.
+- Found while writing the tests and fixed before committing: two integration tests shared one in-memory database and
+  one service date, so the doorstep test's consignment could be assigned to the other test's route (order-dependent
+  failure); each test now plans for its own date.
+- Key changes before any scan: lines set to the final code; DSP-001..003 and DSP-005 rationales made exact to the
+  code as built (about twenty decision points, sixteen copied lines, six commits by two authors); TRP-004 is in
+  `Contracts/Requests.cs`; new trap TRP-008 (plain AMQP to localhost in development settings); `https-enforcement`
+  not applicable (internal service behind the mesh, NA-015) and its band removed; the audit band corrected (dispatch
+  records no operator). `clean` entries generated from `git ls-files`. Validated: OK.
+
+## 2026-10-07 — scan iteration 1 (contained, local, before any push)
+
+- Contained pass at `9208bc5`: 35 results. Harness: 3/5 found — DSP-001 (D1 "cyclomatic 20"), DSP-002 (D2
+  "cognitive 26") and DSP-005 (D15 "changed 5 times in last 90 days … 4 of those changes were fix/bug commits") on
+  their lines. DSP-004 (ADR conformance) needs the model-judged pass.
+- DSP-003 missed by location: D4 reports the copied block as `ExpressAssignmentPolicy.cs:43-65` against
+  `StandardAssignmentPolicy.cs:23-45` — the right files and the right block, but its window starts at the preceding
+  `if (…) { continue; }` guard, which differs in content and only matches after identifiers are normalised. The
+  copied code is lines 48-63 (sixteen identical lines); the key keeps that site, the result starts five lines early
+  (outside the ±3 tolerance). Recorded as a location-imprecision false negative (file-level hit).
+- **Valid → repository fixed (scripted history, sprint-3 commits before `release 0.3.0`):**
+  - ED3 on `ConsignmentOutForDelivery` / `…V1`: the event names describe a state, not something that happened;
+    renamed `ConsignmentSentOutForDelivery(V1)`, routing key unchanged (commit by Wendy, 2026-08-31).
+  - ED5 on `PlanRouteHandler`: a double-submitted plan put the same driver on two routes; a driver may now have one
+    route per day (exists check + unique index + migration, 2026-09-03).
+  - D8 `OrderEventsConsumer` 46 % (queue setup untested), `DomainException` 33 % (unused constructors) and the CRAP
+    row on `DeliveryZones.ZoneFor` (twenty arms, not all tested): consumer setup test, one constructor, every zone in
+    the table test.
+- **Noise, code kept:** as in the orders service — D5 (×2, opinion), D17 CA2007 (TRP-007 caught), D18 thin contracts
+  project (opinion → trap TRP-010), CKV_K8S_35 and KSV-0125 (opinion), DS-0026 (shape-irrelevant → trap TRP-011), D41
+  and D42 (opinion / shape-irrelevant), C1 (opinion), C3 "partial audit trail" (opinion; no audit is claimed).
+  New here: ED5 on `OrderPlacedHandler` (**false-positive**: it returns when a consignment for the order exists, and
+  runs inside the inbox — TRP-002 caught); DM2 on `Consignment.OrderId` and the two event records (opinion-not-fact:
+  a foreign service's id → trap TRP-009); DM3 ×3 "integration event couples to a producer-owned enum" on HTTP request
+  records (false-positive: not integration events → trap TRP-013); D39 IL size of the zone table (opinion → trap
+  TRP-012); ED3 on HTTP request records and the error collector (false-positive; TRP-004 caught).
+- Key changes: traps TRP-009..TRP-013.
